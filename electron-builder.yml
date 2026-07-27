@@ -58,7 +58,6 @@ win:
     - target: portable
       arch:
         - x64
-  artifactName: ${productName}-${version}-${arch}-${target}.${ext}
 nsis:
   oneClick: false
   perMachine: false
@@ -69,6 +68,7 @@ nsis:
 linux:
   icon: build/icon.png
   executableName: fongmi-desktop
+  maintainer: jianbinzhang@126.com
   category: AudioVideo
   synopsis: Cross-platform FongMi desktop client
   description: Cross-platform desktop client compatible with FongMi and TVBox source configurations.
