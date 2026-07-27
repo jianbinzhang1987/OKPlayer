@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="40" x2="980" y2="740" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBFCFF"/>
+      <stop offset="0.55" stop-color="#F3F6FB"/>
+      <stop offset="1" stop-color="#E9EEF7"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(820 70) rotate(132) scale(520 460)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5A8EFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#5A8EFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arrow" x1="345" y1="380" x2="735" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AAB5C8" stop-opacity="0.12"/>
+      <stop offset="0.5" stop-color="#7085A8" stop-opacity="0.64"/>
+      <stop offset="1" stop-color="#AAB5C8" stop-opacity="0.12"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+
+  <rect width="1080" height="760" fill="url(#bg)"/>
+  <rect width="1080" height="760" fill="url(#glow)"/>
+  <circle cx="125" cy="680" r="210" fill="#FFFFFF" fill-opacity="0.78" filter="url(#soft)"/>
+
+  <text x="540" y="94" text-anchor="middle" fill="#15171C" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif" font-size="42" font-weight="650" letter-spacing="-1">安装 FongMi Desktop</text>
+  <text x="540" y="142" text-anchor="middle" fill="#727885" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif" font-size="22">将应用拖入 Applications 文件夹即可完成安装</text>
+
+  <path d="M355 382H709" stroke="url(#arrow)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M682 350L718 382L682 414" fill="none" stroke="#71809B" stroke-opacity="0.72" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="132" y="552" width="816" height="1" fill="#C7CFDC" fill-opacity="0.58"/>
+  <text x="540" y="608" text-anchor="middle" fill="#8B919C" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif" font-size="18">聚合搜索 · 内置播放 · 历史续播</text>
+  <text x="540" y="650" text-anchor="middle" fill="#A4A9B2" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif" font-size="15">FongMi Desktop</text>
+</svg>

@@ -61,7 +61,7 @@ test("CatVod profile encryption defaults to AES-256-GCM with a private key file"
   const key = await readFile(keyPath);
   const keyStat = await stat(keyPath);
   assert.equal(key.length, 32);
-  assert.equal(keyStat.mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal(keyStat.mode & 0o777, 0o600);
 
   const afterRestart = new CatVodProfileEncryptionProvider(new FakeNativeStorage(true), keyPath);
   assert.equal(afterRestart.decryptString(encrypted), secret);

@@ -16,7 +16,7 @@ export function createMpvIpcEndpoint(options: MpvRuntimeOptions = {}): string {
   const pid = options.pid ?? process.pid;
   if (platform === "win32") return `\\\\.\\pipe\\fongmi-desktop-mpv-${pid}`;
   const tempDirectory = options.tempDirectory ?? os.tmpdir();
-  return path.join(tempDirectory, `fongmi-desktop-mpv-${pid}.sock`);
+  return path.posix.join(tempDirectory.replace(/\\/g, "/"), `fongmi-desktop-mpv-${pid}.sock`);
 }
 
 export function isWindowsNamedPipe(value: string): boolean {

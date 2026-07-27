@@ -19,7 +19,7 @@ test("renderer persists a user-facing stable or original line preference", async
 });
 
 test("playback history stores and restores the selected line", async () => {
-  const source = await readFile(appPath, "utf8");
+  const source = (await readFile(appPath, "utf8")).replace(/\r\n/g, "\n");
   assert.ok(source.includes("flag: current.flag"));
   assert.ok(source.includes("flag,\n      position: Math.max(0, startPosition)"));
   assert.ok(source.includes("history.flag"));
