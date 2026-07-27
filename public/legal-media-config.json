@@ -1,0 +1,14 @@
+{
+  "sites": [
+    {
+      "key": "legal_media_smoke",
+      "name": "合法媒体测试源",
+      "type": 1,
+      "api": "./legal-media-api.json",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0,
+      "categories": ["HLS", "MP4", "开放影片"]
+    }
+  ]
+}

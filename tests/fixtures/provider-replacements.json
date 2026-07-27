@@ -1,0 +1,24 @@
+{
+  "replacements": [
+    {
+      "id": "demo-http-replacement",
+      "match": {
+        "api": "csp_NewDemoGuard"
+      },
+      "replacement": {
+        "runtime": "http",
+        "api": "https://example.com/replacement-api"
+      },
+      "capabilities": {
+        "player": false
+      },
+      "source": {
+        "name": "示例替代 Provider",
+        "repository": "https://example.com/repository",
+        "license": "MIT",
+        "verifiedAt": "2026-07-26"
+      },
+      "notes": "仅作为注册表格式和自动化测试示例"
+    }
+  ]
+}

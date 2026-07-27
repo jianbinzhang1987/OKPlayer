@@ -1,0 +1,90 @@
+name: Desktop Cross-Platform Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "resources/**"
+      - "build/**"
+      - "package.json"
+      - "package-lock.json"
+      - "electron-builder.yml"
+      - "vite.config.ts"
+      - "tsconfig*.json"
+      - ".github/workflows/desktop-cross-platform.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "resources/**"
+      - "build/**"
+      - "package.json"
+      - "package-lock.json"
+      - "electron-builder.yml"
+      - "vite.config.ts"
+      - "tsconfig*.json"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS x64
+            package_script: package:mac:dir
+            artifact_path: release/mac
+            artifact_name: fongmi-desktop-macos-x64
+          - os: windows-2025
+            label: Windows x64
+            package_script: package:win:dir
+            artifact_path: release/win-unpacked
+            artifact_name: fongmi-desktop-windows-x64
+          - os: ubuntu-24.04
+            label: Linux x64
+            package_script: package:linux:dir
+            artifact_path: release/linux-unpacked
+            artifact_name: fongmi-desktop-linux-x64
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      npm_config_audit: "false"
+      npm_config_fund: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit and structure tests
+        run: npm test
+
+      - name: Build unpacked application
+        run: npm run ${{ matrix.package_script }}
+
+      - name: Upload unpacked application
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 7

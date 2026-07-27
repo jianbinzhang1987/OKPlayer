@@ -1,0 +1,41 @@
+{
+  "class": [
+    { "type_id": "HLS", "type_name": "HLS" },
+    { "type_id": "MP4", "type_name": "MP4" },
+    { "type_id": "开放影片", "type_name": "开放影片" }
+  ],
+  "list": [
+    {
+      "vod_id": "mux-big-buck-bunny-hls",
+      "vod_name": "Big Buck Bunny（HLS 自适应）",
+      "vod_pic": "",
+      "vod_remarks": "Mux 官方 HLS 测试流",
+      "vod_year": "2008",
+      "vod_area": "测试媒体",
+      "vod_actor": "Blender Foundation",
+      "vod_director": "Sacha Goedegebure",
+      "vod_content": "用于测试 HLS、自适应码率、HLS.js、内置播放器和媒体协议代理。",
+      "type_name": "HLS",
+      "vod_play_from": "官方 HLS",
+      "vod_play_url": "正片$https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    },
+    {
+      "vod_id": "mdn-flower-mp4",
+      "vod_name": "Flower（MP4）",
+      "vod_pic": "",
+      "vod_remarks": "MDN 官方视频示例",
+      "vod_year": "",
+      "vod_area": "测试媒体",
+      "vod_actor": "MDN",
+      "vod_director": "MDN",
+      "vod_content": "用于测试标准 MP4、进度条、暂停、跳转、倍速和断点续播。",
+      "type_name": "MP4",
+      "vod_play_from": "官方 MP4",
+      "vod_play_url": "正片$https://developer.mozilla.org/shared-assets/videos/flower.mp4"
+    }
+  ],
+  "page": 1,
+  "pagecount": 1,
+  "limit": 20,
+  "total": 2
+}

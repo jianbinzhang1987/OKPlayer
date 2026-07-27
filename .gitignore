@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build and packaging outputs
+build/
+dist/
+release/
+artifacts/
+
+# Local runtime data and temporary files
+.tmp-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+*.pid
+*.tmp
+.cache/
+tmp/
+temp/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# Test and coverage outputs
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Package-manager debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,0 +1,23 @@
+{
+  "sites": [
+    {
+      "key": "guard-2",
+      "name": "Android专用二",
+      "type": 3,
+      "api": "CSP_NEWDEMOGUARD"
+    },
+    {
+      "key": "wogg",
+      "name": "玩偶专用",
+      "type": 3,
+      "api": "csp_NewWoggGuard"
+    },
+    {
+      "key": "xyq",
+      "name": "XYQ规则",
+      "type": 10,
+      "api": "csp_XYQHiker",
+      "ext": "{}"
+    }
+  ]
+}

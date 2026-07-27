@@ -1,0 +1,7 @@
+{
+  "sites": [
+    { "key": "json", "name": "JSON源", "type": 1, "api": "https://example.com/api" },
+    { "key": "alist", "name": "网盘", "type": 13, "api": "csp_Alist", "ext": { "server": "https://example.com" } },
+    { "key": "guard", "name": "Android专用", "type": 3, "api": "csp_NewDemoGuard" }
+  ]
+}

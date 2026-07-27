@@ -1,0 +1,25 @@
+{
+  "class": [
+    { "type_id": "开放电影", "type_name": "开放电影" },
+    { "type_id": "动画", "type_name": "动画" }
+  ],
+  "list": [
+    {
+      "vod_id": "big-buck-bunny",
+      "vod_name": "大雄兔（Big Buck Bunny）",
+      "vod_pic": "",
+      "vod_remarks": "Blender 开放电影 · HLS 公开测试",
+      "vod_year": "2008",
+      "vod_area": "荷兰",
+      "vod_actor": "Blender Foundation",
+      "vod_director": "Sacha Goedegebure",
+      "vod_content": "Blender Foundation 发布的开放动画短片，可用于合法验证在线播放、搜索、详情与内置播放器能力。",
+      "vod_play_from": "公开 HLS",
+      "vod_play_url": "正片$https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    }
+  ],
+  "page": 1,
+  "pagecount": 1,
+  "limit": 20,
+  "total": 1
+}

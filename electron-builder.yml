@@ -1,0 +1,82 @@
+appId: com.fongmi.desktop
+productName: FongMi Desktop
+copyright: Copyright © 2026 FongMi Desktop
+asar: true
+electronVersion: 43.2.0
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - package.json
+  - THIRD_PARTY_NOTICES.md
+extraResources:
+  - from: resources/mpv
+    to: mpv
+    filter:
+      - "**/*"
+mac:
+  icon: build/icon.icns
+  category: public.app-category.entertainment
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  minimumSystemVersion: "12.0"
+  target:
+    - target: dir
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}.${ext}
+dmg:
+  title: ${productName} ${version}
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  background: build/dmg-background.png
+  badgeIcon: build/icon.icns
+  icon: build/icon.icns
+  iconSize: 96
+  iconTextSize: 12
+  window:
+    width: 660
+    height: 400
+  contents:
+    - x: 180
+      y: 210
+      type: file
+    - x: 480
+      y: 210
+      type: link
+      path: /Applications
+win:
+  icon: build/icon.png
+  executableName: FongMi Desktop
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}-${target}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+linux:
+  icon: build/icon.png
+  executableName: fongmi-desktop
+  category: AudioVideo
+  synopsis: Cross-platform FongMi desktop client
+  description: Cross-platform desktop client compatible with FongMi and TVBox source configurations.
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}.${ext}

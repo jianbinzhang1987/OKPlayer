@@ -1,0 +1,14 @@
+{
+  "sites": [
+    {
+      "key": "public_domain_movies",
+      "name": "公开影片测试源",
+      "type": 1,
+      "api": "./public-domain-api.json",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0,
+      "categories": ["开放电影", "动画"]
+    }
+  ]
+}
