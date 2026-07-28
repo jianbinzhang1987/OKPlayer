@@ -32,6 +32,7 @@ import { sourceQualityLabel, sortSourcesByQuality } from "../../core/source-rank
 import { inferConfigName } from "./source-config-strategy.ts";
 import { groupNormalizedSearchResults, rankAlternativeSourceCandidates } from "./search-normalization.ts";
 import { resolveSearchEmptyState } from "./search-empty-state.ts";
+import { makeSerializableSetting, settingValuesEqual } from "./settings-persistence.ts";
 import {
   presentRendererError,
   type RendererErrorContext,
@@ -391,6 +392,7 @@ const fontSize = ref<FontSizePreference>("standard");
 const themeMode = ref<ThemeMode>("system");
 const systemPrefersDark = ref(true);
 const settingsSaved = ref(false);
+const settingsSaving = ref(false);
 const advancedSettingsOpen = ref(false);
 const replacementRegistrySource = ref("");
 const replacementRegistryCount = ref(0);
@@ -2559,32 +2561,63 @@ async function dismissStorageRecoveryNotice() {
 }
 
 async function saveSettings() {
+  if (settingsSaving.value) return;
   settingsSaved.value = false;
-  danmakuSettings.value = normalizeDanmakuSettings({
-    ...danmakuSettings.value,
-    blockedWords: parseBlockedWords(danmakuBlockedWordsText.value),
-  });
-  subtitleSettings.value = normalizeSubtitleSettings(subtitleSettings.value);
-  danmakuBlockedWordsText.value = danmakuSettings.value.blockedWords.join("，");
-  await Promise.all([
-    window.tvApi.setSetting("defaultSpeed", Number(defaultSpeed.value)),
-    window.tvApi.setSetting("danmakuSettings", danmakuSettings.value),
-    window.tvApi.setSetting("subtitleSettings", subtitleSettings.value),
-    window.tvApi.setSetting("linePreference", linePreference.value),
-    window.tvApi.setSetting("autoFallbackLine", autoFallbackLine.value),
-    window.tvApi.setSetting("compatibilityFallbackMode", compatibilityFallbackMode.value),
-    window.tvApi.setSetting("webPlayerEngine", webPlayerEngine.value),
-    window.tvApi.setSetting("autoFallbackSource", autoFallbackSource.value),
-    window.tvApi.setSetting("autoNextEpisode", autoNextEpisode.value),
-    window.tvApi.setSetting("externalPlayerPreference", externalPlayerPreference.value),
-    window.tvApi.setSetting("fontSize", fontSize.value),
-    window.tvApi.setSetting("themeMode", themeMode.value),
-    window.tvApi.setSetting("homeCarouselEnabled", homeCarouselEnabled.value),
-    window.tvApi.setSetting("catVodRemoteAccessPolicy", catVodRemoteAccessPolicy.value),
-    window.tvApi.setSetting("catVodUpdateStrategy", catVodUpdateStrategy.value),
-  ]);
-  settingsSaved.value = true;
-  window.setTimeout(() => { settingsSaved.value = false; }, 1800);
+  settingsSaving.value = true;
+  try {
+    danmakuSettings.value = normalizeDanmakuSettings({
+      ...danmakuSettings.value,
+      blockedWords: parseBlockedWords(danmakuBlockedWordsText.value),
+    });
+    subtitleSettings.value = normalizeSubtitleSettings(subtitleSettings.value);
+    danmakuBlockedWordsText.value = danmakuSettings.value.blockedWords.join("，");
+
+    const serializableDanmakuSettings = makeSerializableSetting(danmakuSettings.value);
+    const serializableSubtitleSettings = makeSerializableSetting(subtitleSettings.value);
+    await window.tvApi.setSetting("defaultSpeed", Number(defaultSpeed.value));
+    await window.tvApi.setSetting("danmakuSettings", serializableDanmakuSettings);
+    await window.tvApi.setSetting("subtitleSettings", serializableSubtitleSettings);
+    await window.tvApi.setSetting("linePreference", linePreference.value);
+    await window.tvApi.setSetting("autoFallbackLine", autoFallbackLine.value);
+    await window.tvApi.setSetting("compatibilityFallbackMode", compatibilityFallbackMode.value);
+    await window.tvApi.setSetting("webPlayerEngine", webPlayerEngine.value);
+    await window.tvApi.setSetting("autoFallbackSource", autoFallbackSource.value);
+    await window.tvApi.setSetting("autoNextEpisode", autoNextEpisode.value);
+    await window.tvApi.setSetting("externalPlayerPreference", externalPlayerPreference.value);
+    await window.tvApi.setSetting("fontSize", fontSize.value);
+    await window.tvApi.setSetting("themeMode", themeMode.value);
+    await window.tvApi.setSetting("homeCarouselEnabled", homeCarouselEnabled.value);
+    await window.tvApi.setSetting("catVodRemoteAccessPolicy", catVodRemoteAccessPolicy.value);
+    await window.tvApi.setSetting("catVodUpdateStrategy", catVodUpdateStrategy.value);
+
+    const values = [
+      ["defaultSpeed", Number(defaultSpeed.value)],
+      ["danmakuSettings", serializableDanmakuSettings],
+      ["subtitleSettings", serializableSubtitleSettings],
+      ["linePreference", linePreference.value],
+      ["autoFallbackLine", autoFallbackLine.value],
+      ["compatibilityFallbackMode", compatibilityFallbackMode.value],
+      ["webPlayerEngine", webPlayerEngine.value],
+      ["autoFallbackSource", autoFallbackSource.value],
+      ["autoNextEpisode", autoNextEpisode.value],
+      ["externalPlayerPreference", externalPlayerPreference.value],
+      ["fontSize", fontSize.value],
+      ["themeMode", themeMode.value],
+      ["homeCarouselEnabled", homeCarouselEnabled.value],
+      ["catVodRemoteAccessPolicy", catVodRemoteAccessPolicy.value],
+      ["catVodUpdateStrategy", catVodUpdateStrategy.value],
+    ] as const;
+    const persistedValues = await Promise.all(values.map(([key]) => window.tvApi.getSetting(key, null)));
+    const failedIndex = persistedValues.findIndex((value, index) => !settingValuesEqual(value, values[index]?.[1]));
+    if (failedIndex >= 0) throw new Error(`设置 ${values[failedIndex]?.[0] ?? "未知"} 写入后校验失败`);
+
+    settingsSaved.value = true;
+    window.setTimeout(() => { settingsSaved.value = false; }, 1800);
+  } catch (error) {
+    showUserError(`设置保存失败：${friendlyError(error)}`, "settings");
+  } finally {
+    settingsSaving.value = false;
+  }
 }
 
 watch(homeCarouselEnabled, () => scheduleHeroRotation());
@@ -3359,7 +3392,7 @@ onBeforeUnmount(() => {
             </div>
           </section>
           </div>
-          <div class="settings-footer"><span v-if="settingsSaved" class="saved-indicator"><AppIcon name="check" :size="16" />设置已保存</span><button class="primary-button" @click="saveSettings">保存设置</button></div>
+          <div class="settings-footer"><span v-if="settingsSaved" class="saved-indicator"><AppIcon name="check" :size="16" />设置已保存并校验</span><button class="primary-button" :disabled="settingsSaving" @click="saveSettings">{{ settingsSaving ? '正在保存…' : '保存设置' }}</button></div>
         </section>
       </main>
 

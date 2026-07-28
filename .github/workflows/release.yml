@@ -158,7 +158,9 @@ jobs:
         with:
           name: OKPlayer ${{ github.ref_name }}
           body: |
-            OKPlayer 首个跨平台公开版本。
+            OKPlayer 跨平台桌面版本。
+
+            本版本重点修复浅色主题可读性、Windows CatVod 服务启动和设置持久化问题，并优化搜索与播放源界面。
 
             包含以下桌面安装包：
             - macOS Intel x64 DMG

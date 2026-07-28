@@ -13,6 +13,7 @@ import type {
 } from "../core/catvod/catvod-types.ts";
 
 const START_TIMEOUT_MS = 30_000;
+const WINDOWS_START_TIMEOUT_MS = 60_000;
 const HEALTH_INTERVAL_MS = 250;
 const logWriteQueues = new Map<string, Promise<void>>();
 
@@ -44,7 +45,7 @@ export class CatVodProcessManager {
     this.bundleManager = options.bundleManager;
     this.sourceMd5Url = options.sourceMd5Url;
     this.bootstrapPath = options.bootstrapPath;
-    this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
+    this.startTimeoutMs = options.startTimeoutMs ?? defaultCatVodStartTimeout(process.platform);
     this.hostMessageHandler = options.hostMessageHandler;
     this.remoteAccessPolicy = options.remoteAccessPolicy ?? "allow";
     this.currentStatus = {
@@ -191,7 +192,7 @@ export class CatVodProcessManager {
     const scriptPath = this.bundleManager.scriptPath(version);
     const child = utilityProcess.fork(this.bootstrapPath, [], {
       cwd: this.bundleManager.runtimeDir,
-      env: childEnvironment(port, smoke, scriptPath, this.remoteAccessPolicy),
+      env: createCatVodChildEnvironment(port, smoke, scriptPath, this.remoteAccessPolicy),
       stdio: "pipe",
       serviceName: smoke ? "CatVod Candidate Smoke Test" : "CatVod Node Service",
       disclaim: true,
@@ -215,11 +216,23 @@ export class CatVodProcessManager {
         remoteAccessPolicy: this.remoteAccessPolicy,
         message: "CatVod 子进程已经启动，正在等待健康检查",
       };
-      child.once("exit", () => void this.handleUnexpectedExit(version, child));
     }
 
+    let startupExitListener: ((code: number) => void) | undefined;
+    const startupExit = new Promise<never>((_resolve, reject) => {
+      startupExitListener = (code: number) => {
+        reject(new Error(`CatVod 子进程启动阶段异常退出（退出码 ${code}），服务日志：${logFile}`));
+      };
+      child.once("exit", startupExitListener);
+    });
+
     try {
-      await waitForService(baseUrl, this.startTimeoutMs);
+      await Promise.race([
+        waitForService(baseUrl, this.startTimeoutMs),
+        startupExit,
+      ]);
+      if (!smoke) child.once("exit", () => void this.handleUnexpectedExit(version, child));
+      if (startupExitListener) child.removeListener("exit", startupExitListener);
       const config = await fetchJson(`${baseUrl}/config`, 10_000);
       const siteCount = countSites(config);
       if (smoke) {
@@ -253,9 +266,11 @@ export class CatVodProcessManager {
       };
       return this.status();
     } catch (error) {
+      if (startupExitListener) child.removeListener("exit", startupExitListener);
       child.kill();
       if (!smoke) this.child = undefined;
-      throw error;
+      const message = errorMessage(error);
+      throw new Error(message.includes(logFile) ? message : `${message}；服务日志：${logFile}`);
     }
   }
 
@@ -356,19 +371,32 @@ export class CatVodProcessManager {
   }
 }
 
-function childEnvironment(
+export function defaultCatVodStartTimeout(platform: NodeJS.Platform): number {
+  return platform === "win32" ? WINDOWS_START_TIMEOUT_MS : START_TIMEOUT_MS;
+}
+
+export function createCatVodChildEnvironment(
   port: number,
   smoke: boolean,
   scriptPath: string,
   remoteAccessPolicy: CatVodRemoteAccessPolicy,
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const allowed = [
     "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    // Windows 的 Utility Process 和第三方 CatVod 脚本可能依赖这些系统目录。
+    "SystemRoot", "WINDIR", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ProgramFiles", "ProgramFiles(x86)",
+    "ProgramW6432", "COMSPEC", "PATHEXT", "OS", "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER", "NUMBER_OF_PROCESSORS",
   ];
   const env: NodeJS.ProcessEnv = {};
-  for (const key of allowed) if (process.env[key] !== undefined) env[key] = process.env[key];
+  for (const key of allowed) if (sourceEnvironment[key] !== undefined) env[key] = sourceEnvironment[key];
+  const noProxy = mergeNoProxy(env.NO_PROXY ?? env.no_proxy);
+  env.NO_PROXY = noProxy;
+  env.no_proxy = noProxy;
   env.HOST = "127.0.0.1";
   env.PORT = String(port);
   env.DEV_HTTP_PORT = String(port);
@@ -378,6 +406,17 @@ function childEnvironment(
   env.CATVOD_REMOTE_AUDIT_WINDOW_MS = "15000";
   if (smoke) env.CATVOD_SMOKE_TEST = "1";
   return env;
+}
+
+function mergeNoProxy(value: string | undefined): string {
+  const entries = String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  for (const host of ["127.0.0.1", "localhost", "::1"]) {
+    if (!entries.some((item) => item.toLowerCase() === host.toLowerCase())) entries.push(host);
+  }
+  return entries.join(",");
 }
 
 function pipeLogs(child: UtilityProcess, logFile: string): void {

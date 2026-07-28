@@ -4509,6 +4509,145 @@ select:focus-visible {
   text-align: center;
 }
 
+/* Readability polish for the search and content-source workspaces. */
+.search-header-row {
+  margin-bottom: 18px;
+}
+
+.search-scope {
+  gap: 9px;
+}
+
+.search-scope button {
+  min-height: 42px;
+  padding: 0 18px;
+  font-size: var(--font-small);
+  font-weight: 600;
+}
+
+.search-command-panel {
+  padding: 20px;
+  border-radius: 18px;
+}
+
+.search-command-input {
+  grid-template-columns: 28px minmax(0, 1fr) 32px;
+  gap: 12px;
+  min-height: 68px;
+  padding: 0 20px;
+  border-radius: 16px;
+}
+
+.search-command-input input {
+  font-size: calc(var(--font-body) + 3px);
+  font-weight: 500;
+  letter-spacing: 0.005em;
+}
+
+.search-command-input > button {
+  width: 30px;
+  height: 30px;
+}
+
+.search-suggestions {
+  margin-top: 16px;
+}
+
+.search-suggestions > div {
+  min-height: 102px;
+  padding: 16px 18px;
+}
+
+.search-suggestions strong {
+  font-size: var(--font-small);
+}
+
+.search-suggestions > div > div {
+  gap: 9px;
+  margin-top: 11px;
+}
+
+.search-suggestions button {
+  min-height: 36px;
+  padding: 0 13px;
+  font-size: var(--font-small);
+}
+
+.search-suggestions span {
+  font-size: var(--font-caption);
+}
+
+.quick-source-search {
+  width: min(920px, 100%);
+  height: 52px;
+  padding: 0 16px;
+}
+
+.quick-source-search input {
+  font-size: var(--font-body-large);
+}
+
+.quick-source-tabs {
+  gap: 9px;
+  margin-top: 16px;
+}
+
+.quick-source-tabs button {
+  height: 38px;
+  padding: 0 16px;
+  font-size: var(--font-small);
+  font-weight: 600;
+}
+
+.quick-source-section {
+  margin-top: 30px;
+}
+
+.quick-source-section-heading {
+  margin-bottom: 14px;
+}
+
+.quick-source-section-heading h2 {
+  font-size: 20px;
+}
+
+.quick-source-section-heading span,
+.quick-source-section-heading em {
+  font-size: var(--font-caption);
+}
+
+.quick-source-grid {
+  gap: 14px;
+}
+
+.quick-source-card {
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 13px;
+  min-height: 126px;
+  padding: 18px;
+}
+
+.quick-source-card .source-quick-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.quick-source-card-copy strong {
+  font-size: var(--font-card-title);
+}
+
+.quick-source-card-copy small,
+.quick-source-state {
+  font-size: var(--font-caption);
+}
+
+.quick-source-state {
+  right: 16px;
+  bottom: 15px;
+}
+
 /* Light appearance keeps the same information architecture while replacing dark glass surfaces. */
 .app-shell.theme-light {
   --bg: #f3f5f8;
@@ -4582,6 +4721,54 @@ select:focus-visible {
   color: var(--text);
   background: rgba(255, 255, 255, 0.96);
   box-shadow: var(--shadow-soft);
+}
+
+.theme-light :is(.primary-nav, .secondary-nav) button:hover {
+  color: var(--text);
+  background: rgba(20, 32, 52, 0.07);
+}
+
+.theme-light :is(.primary-nav, .secondary-nav) button.active {
+  color: #ffffff;
+  background: linear-gradient(180deg, #2389f2, #0b6dcc);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.24), 0 7px 18px rgba(22, 103, 190, 0.18);
+}
+
+.theme-light :is(.primary-nav, .secondary-nav) button.active .app-icon {
+  color: #ffffff;
+}
+
+.theme-light .category-strip button:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: rgba(20, 32, 52, 0.08);
+}
+
+.theme-light .search-command-input {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.theme-light .search-command-input input,
+.theme-light .source-import-drawer input {
+  color: var(--text);
+}
+
+.theme-light .source-import-drawer input {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.theme-light :is(.settings-icon, .site-avatar, .site-main .health-result, .source-config-settings-icon, .source-quick-icon) {
+  color: #1768b0;
+}
+
+.theme-light :is(.success-chip, .saved-indicator, .simple-config-state, .current-source-copy > div strong, .catvod-remote-audit-heading em, .catvod-remote-audit-list em) {
+  color: #176c32;
+}
+
+.theme-light :is(.warning-chip, .storage-recovery-notice) {
+  color: #8a5200;
 }
 
 .theme-light .hero:not(.hero-empty),

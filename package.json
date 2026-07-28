@@ -1,7 +1,7 @@
 {
   "name": "fongmi-desktop",
   "productName": "FongMi Desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A cross-platform desktop client compatible with FongMi and TVBox source configurations.",
   "author": "FongMi Desktop Contributors",
   "private": true,
