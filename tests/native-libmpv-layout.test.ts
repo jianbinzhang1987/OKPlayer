@@ -121,6 +121,8 @@ test("native libmpv project layout is present and package-aware", async () => {
     assert.ok(afterPack.includes(marker), `missing afterPack marker: ${marker}`);
   }
   assert.ok(packagedE2e.includes("FONGMI_ENABLE_NATIVE_LIBMPV"));
+  assert.ok(packagedE2e.includes("packagedLaunchArgs"));
+  assert.ok(packagedE2e.includes('process.platform === "linux" ? ["--no-sandbox"] : []'));
   assert.ok(packagedE2e.includes("noDevelopmentPath"));
   assert.ok(packagedE2e.includes("manifestPathSanitized"));
   assert.ok(packagedE2e.includes("preparedManifestPathSanitized"));

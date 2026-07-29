@@ -43,7 +43,7 @@ let result;
 try {
   app = await electron.launch({
     executablePath,
-    args: [`--user-data-dir=${profile}`],
+    args: packagedLaunchArgs(profile),
     cwd: root,
     env: packagedEnvironment(),
     timeout: 40_000,
@@ -69,7 +69,7 @@ try {
 
   app = await electron.launch({
     executablePath,
-    args: [`--user-data-dir=${profile}`],
+    args: packagedLaunchArgs(profile),
     cwd: root,
     env: packagedEnvironment(),
     timeout: 40_000,
@@ -205,6 +205,13 @@ async function runRenderTest(page, input) {
 
 function containsDevelopmentPath(value) {
   return /(?:\/Users\/|\/home\/[^/]+\/|\/usr\/local\/|\/opt\/homebrew\/|\/opt\/libmpv\/|[A-Za-z]:\\Users\\)/i.test(String(value || ""));
+}
+
+function packagedLaunchArgs(profileDirectory) {
+  return [
+    `--user-data-dir=${profileDirectory}`,
+    ...(process.platform === "linux" ? ["--no-sandbox"] : []),
+  ];
 }
 
 function packagedEnvironment() {
