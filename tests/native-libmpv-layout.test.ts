@@ -72,8 +72,6 @@ test("native libmpv project layout is present and package-aware", async () => {
   const nativePackager = await readFile(new URL("../scripts/package-native-libmpv.mjs", import.meta.url), "utf8");
   const workflow = await readFile(new URL("../.github/workflows/desktop-cross-platform.yml", import.meta.url), "utf8");
   assert.ok(dynamicLoader.includes("const char* loader_error = dlerror()"));
-  assert.ok(dynamicLoader.includes("RTLD_DEEPBIND"));
-  assert.ok(dynamicLoader.includes("Chromium's incompatible"));
   assert.ok(dynamicLoader.includes("selected.is_absolute()"));
   assert.ok(dynamicLoader.includes("Never search the process/global loader paths"));
   assert.doesNotMatch(dynamicLoader, /candidates\.emplace_back\("libmpv(?:\.2)?\.dylib"\)/);

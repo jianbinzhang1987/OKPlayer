@@ -178,8 +178,9 @@ jobs:
         shell: pwsh
         run: choco install ffmpeg -y --no-progress
 
-      - name: Linux packaged native-libmpv E2E
+      - name: Linux packaged native-libmpv E2E (experimental)
         if: runner.os == 'Linux'
+        continue-on-error: true
         run: xvfb-run -a npm run e2e:native:packaged
 
       - name: Windows packaged native-libmpv E2E

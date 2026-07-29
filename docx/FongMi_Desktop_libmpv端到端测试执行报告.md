@@ -2,7 +2,7 @@
 
 > 执行日期：2026-07-29
 > 测试依据：`docx/FongMi_Desktop_libmpv原生内嵌端到端测试用例.md`
-> 当前结论：macOS x64 已完成 libmpv 真内嵌、自包含运行时、无环境变量自动启用、用户关闭回退、安装包依赖闭包与端到端验证。Windows HWND/WGL 与 Linux X11/GLX 代码、依赖闭包审计和目标系统 CI 入口已完成；Linux CI 已配置真实 libmpv + Xvfb packaged E2E，Windows CI 支持通过“固定 ZIP URL + SHA-256”执行受控原生 E2E，但对应远程 runner 结果尚未产生，不能表述为三端最终验收通过。
+> 当前结论：macOS x64 已完成 libmpv 真内嵌、自包含运行时、无环境变量自动启用、用户关闭回退、安装包依赖闭包与端到端验证。Windows HWND/WGL 原生工程已在远程 runner 完成编译与标准应用构建；Linux X11/GLX 原生工程及依赖闭包打包通过，但 packaged E2E 暴露 Electron/Chromium 与系统 libmpv 的 FFmpeg ABI 冲突，当前作为实验性非阻断检查，不进入稳定版发布承诺。Linux 稳定版继续发布标准应用内播放器版本，不能表述为三端 native-libmpv 最终验收通过。
 
 ---
 
