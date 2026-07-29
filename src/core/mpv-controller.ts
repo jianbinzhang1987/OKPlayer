@@ -40,6 +40,10 @@ export class MpvController {
     return this.ipcPath;
   }
 
+  getBackend() {
+    return "mpv-ipc";
+  }
+
   isStarted() {
     return this.process !== undefined && this.socket !== undefined && !this.socket.destroyed;
   }
@@ -72,6 +76,8 @@ export class MpvController {
     await this.observeProperty(1, "time-pos");
     await this.observeProperty(2, "duration");
     await this.observeProperty(3, "pause");
+    await this.observeProperty(4, "volume");
+    await this.observeProperty(5, "mute");
   }
 
   private async connectWithRetry(): Promise<void> {
@@ -131,8 +137,15 @@ export class MpvController {
 
   async load(url: string, headers: Record<string, string> = {}) {
     const headerFields = formatHttpHeaderFields(headers);
-    // Always reset this property so protected playback credentials do not leak
-    // into the next unrelated item handled by the same mpv process.
+    const userAgent = headerValue(headers, "user-agent") || "Mozilla/5.0";
+    const referrer = headerValue(headers, "referer") || headerValue(headers, "referrer");
+    // User-Agent values commonly contain commas. Passing them through mpv's
+    // comma-delimited http-header-fields option splits one valid header into
+    // several malformed headers and can make otherwise valid media return 400.
+    // Keep the dedicated properties separate and reset every request-scoped
+    // value so credentials and referrers never leak into the next item.
+    await this.command(["set_property", "user-agent", userAgent]);
+    await this.command(["set_property", "referrer", referrer]);
     await this.command(["set_property", "http-header-fields", headerFields]);
     return this.command(["loadfile", url, "replace"]);
   }
@@ -157,6 +170,15 @@ export class MpvController {
   setSpeed(speed: number) {
     if (!Number.isFinite(speed) || speed < 0.25 || speed > 5) throw new Error("播放速度范围应为0.25到5");
     return this.command(["set_property", "speed", speed]);
+  }
+
+  setVolume(volume: number) {
+    if (!Number.isFinite(volume) || volume < 0 || volume > 100) throw new Error("音量范围应为0到100");
+    return this.command(["set_property", "volume", Math.round(volume)]);
+  }
+
+  setMuted(muted: boolean) {
+    return this.command(["set_property", "mute", Boolean(muted)]);
   }
 
   observeProperty(id: number, name: string) {
@@ -221,9 +243,16 @@ export function formatHttpHeaderFields(headers: Record<string, string>): string 
     const normalized = name.toLowerCase();
     const value = String(rawValue ?? "").trim();
     if (!name || !value || BLOCKED_MPV_HEADERS.has(normalized)) continue;
+    if (normalized === "user-agent" || normalized === "referer" || normalized === "referrer") continue;
     if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) continue;
     if (/[\r\n]/.test(value)) continue;
     fields.push(`${name}: ${value}`);
   }
   return fields.join(",");
+}
+
+function headerValue(headers: Record<string, string>, target: string): string {
+  const entry = Object.entries(headers).find(([name]) => name.trim().toLowerCase() === target);
+  const value = String(entry?.[1] ?? "").trim();
+  return /[\r\n]/.test(value) ? "" : value;
 }

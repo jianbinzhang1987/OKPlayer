@@ -6,7 +6,7 @@ import { isFolderItem, resolveContentRoute } from "./app-model.ts";
 import { FONT_SIZE_OPTIONS, fontSizeClass as resolveFontSizeClass, normalizeFontSize, type FontSizePreference } from "./font-size.ts";
 import { resolveEpisodeNavigation, resolveFallbackPlaybackLine, resolvePlaybackEpisodeTarget, resolvePreferredPlaybackLine, type PlaybackLinePreference } from "./player-navigation.ts";
 import { normalizeCompatibilityFallbackMode, type CompatibilityFallbackMode } from "./player/playback-error-policy.ts";
-import { normalizeWebPlayerEngine, type WebPlayerEngine } from "./player/player-types.ts";
+import { normalizePlaybackMode, normalizeWebPlayerEngine, type PlaybackMode, type WebPlayerEngine } from "./player/player-types.ts";
 import {
   DEFAULT_DANMAKU_SETTINGS,
   DEFAULT_SUBTITLE_SETTINGS,
@@ -28,8 +28,14 @@ import {
   selectHomeRecommendations,
   selectHomeSection,
 } from "./home-recommendation.ts";
-import { sourceQualityLabel, sortSourcesByQuality } from "../../core/source-ranking.ts";
-import { inferConfigName } from "./source-config-strategy.ts";
+import { sortSourcesByQuality } from "../../core/source-ranking.ts";
+import {
+  inferCatVodSourceLabel,
+  inferConfigName,
+  isCatVodBundleSource,
+  selectCatVodSiteAfterImport,
+  selectConfigSiteAfterImport,
+} from "./source-config-strategy.ts";
 import { groupNormalizedSearchResults, rankAlternativeSourceCandidates } from "./search-normalization.ts";
 import { resolveSearchEmptyState } from "./search-empty-state.ts";
 import { makeSerializableSetting, settingValuesEqual } from "./settings-persistence.ts";
@@ -156,6 +162,9 @@ type AppInfo = {
   desktopPlatform?: "mac" | "windows" | "linux";
   usesMacTrafficLights?: boolean;
   supportsExternalIina?: boolean;
+  playerBackend?: "mpv-ipc" | "native-libmpv" | "unavailable";
+  nativeLibmpvPreferenceEnabled?: boolean;
+  nativeLibmpv?: { available?: boolean; reason?: string; addonPath?: string; libraryPath?: string; buildInfo?: { linkedLibmpv?: boolean; renderReady?: boolean; renderApiAvailable?: boolean; platform?: string; api?: string; libmpvPath?: string; libmpvError?: string; clientApiVersion?: number } };
   arch: string;
 };
 type SearchStatus = { siteKey: string; siteName: string; configName?: string; state: "success" | "error"; count: number; page?: number; pageCount?: number; hasMore?: boolean; message?: string };
@@ -257,14 +266,13 @@ type PendingPanPlayback = {
   startPosition: number;
 };
 type PendingPanFolder = { item: Vod; trail: FolderTrailItem[] };
-type CompatibilityPlaybackContext = {
-  item: Vod;
-  flag: string;
-  episode: Episode;
-  started: boolean;
-  position: number;
-  duration: number;
+type PendingSourceImport = {
+  source: string;
+  name: string;
+  catVodBundle: boolean;
+  previousActiveSite: string;
 };
+type PlaybackEnginePreference = { engine: "compatibility"; updatedAt: number };
 type ExternalPlayerPreference = "iina" | "vlc" | "system";
 type ThemeMode = "system" | "dark" | "light";
 type StorageRecoveryNotice = { state: "restored-backup" | "reset-empty"; message: string; archivedPath?: string; backupPath?: string; recoveredAt?: number };
@@ -331,6 +339,7 @@ const homeItems = ref<Vod[]>([]);
 const homeRecommendations = ref<Vod[]>([]);
 const homeMovieSourceItems = ref<Vod[]>([]);
 const homeTvSourceItems = ref<Vod[]>([]);
+const brokenImageUrls = ref<Set<string>>(new Set());
 const heroIndex = ref(0);
 const heroHovered = ref(false);
 const heroWindowFocused = ref(true);
@@ -367,6 +376,7 @@ const errorTechnicalOpen = ref(false);
 const histories = ref<HistoryRecord[]>([]);
 const favorites = ref<FavoriteRecord[]>([]);
 const playing = ref<PlayingState | null>(null);
+const latestPlaybackProgress = ref<PlaybackProgress>({ position: 0, duration: 0, completed: false });
 const paused = ref(false);
 const checkingSite = ref("");
 const healthResults = ref<Record<string, string>>({});
@@ -385,6 +395,9 @@ const storageRecoveryNotice = ref<StorageRecoveryNotice | null>(null);
 const linePreference = ref<PlaybackLinePreference>("stable");
 const autoFallbackLine = ref(true);
 const compatibilityFallbackMode = ref<CompatibilityFallbackMode>("automatic");
+const playbackMode = ref<PlaybackMode>("auto");
+const nativeLibmpvEnabled = ref(true);
+const playbackEnginePreferences = ref<Record<string, PlaybackEnginePreference>>({});
 const webPlayerEngine = ref<WebPlayerEngine>("legacy");
 const autoFallbackSource = ref(true);
 const autoNextEpisode = ref(true);
@@ -402,6 +415,7 @@ const editingConfigUrl = ref("");
 const editingConfigName = ref("");
 const deletingConfigUrl = ref("");
 const contentSourceMessage = ref("");
+const pendingSourceImport = ref<PendingSourceImport | null>(null);
 const appInfo = ref<AppInfo | null>(null);
 const catVodStatus = ref<CatVodStatus | null>(null);
 const catVodMd5Url = ref("https://9280.kstore.vip/cat/index.js.md5");
@@ -424,7 +438,6 @@ const nativeHlsSupported = detectNativeHlsSupport();
 let sourceAuditTimer: ReturnType<typeof window.setTimeout> | undefined;
 let removeCatVodHostEvent: (() => void) | undefined;
 let removeIncrementalSearchEvent: (() => void) | undefined;
-let removePlayerStateEvent: (() => void) | undefined;
 let activeIncrementalSearchRequestId = "";
 let incrementalSearchStatusMode: "replace" | "accumulate" = "replace";
 let incrementalSearchBatch: "smart-initial" | "expanded" | "pagination" = "expanded";
@@ -432,9 +445,9 @@ let panLoginTimer: ReturnType<typeof window.setTimeout> | undefined;
 let heroRotationTimer: ReturnType<typeof window.setTimeout> | undefined;
 let heroManualPauseUntil = 0;
 let homeLoadRequestId = 0;
+const homeLoadedSiteKey = ref("");
 const pendingPanPlayback = ref<PendingPanPlayback | null>(null);
 const pendingPanFolder = ref<PendingPanFolder | null>(null);
-let compatibilityPlaybackContext: CompatibilityPlaybackContext | undefined;
 let themeMediaQuery: MediaQueryList | undefined;
 let restoringInitialSite = true;
 
@@ -487,6 +500,18 @@ const visibleLibraryItems = computed(() => {
 });
 const hotSearchTerms = computed(() => homeItems.value.slice(0, 4).map((item) => item.vodName));
 const activeConfig = computed(() => configs.value.find((config) => config.enabled));
+const catVodSourceSites = computed(() => selectableSites.value.filter((site) => site.key.startsWith("catvod:")));
+const ordinarySourceSites = computed(() => selectableSites.value.filter((site) => !site.key.startsWith("catvod:")));
+const activeSiteIsCatVod = computed(() => activeSite.value.startsWith("catvod:"));
+const catVodSourceLabel = computed(() => inferCatVodSourceLabel(catVodStatus.value?.sourceMd5Url || catVodMd5Url.value));
+const activeSourcePackageLabel = computed(() => activeSiteIsCatVod.value && catVodStatus.value?.state === "running"
+  ? catVodSourceLabel.value
+  : activeConfig.value?.name ?? (catVodStatus.value?.state === "running" ? catVodSourceLabel.value : "未选择配置"));
+const activeSourcePackageSites = computed(() => activeSiteIsCatVod.value
+  ? catVodSourceSites.value
+  : ordinarySourceSites.value);
+const activeSourcePackageSiteCount = computed(() => activeSourcePackageSites.value.length);
+const firstCatVodSourceKey = computed(() => catVodSourceSites.value[0]?.key ?? "");
 const otherConfigs = computed(() => configs.value.filter((config) => !config.enabled));
 const visibleFolderItems = computed(() => {
   const query = folderQuery.value.trim().toLowerCase();
@@ -518,14 +543,14 @@ const quickCategories = computed(() => [
   { id: "__favorites__", name: "我的收藏", sourceCategories: [] },
 ]);
 const favoriteSourceSites = computed(() => favoriteSourceKeys.value
-  .map((key) => selectableSites.value.find((site) => site.key === key))
+  .map((key) => activeSourcePackageSites.value.find((site) => site.key === key))
   .filter((site): site is Site => site !== undefined));
 const recentSourceSites = computed(() => recentSourceKeys.value
-  .map((key) => selectableSites.value.find((site) => site.key === key))
+  .map((key) => activeSourcePackageSites.value.find((site) => site.key === key))
   .filter((site): site is Site => site !== undefined));
-const sourcePageSites = computed(() => filterSourceSites(selectableSites.value, sourcePageQuery.value, sourcePageFilter.value));
+const sourcePageSites = computed(() => filterSourceSites(activeSourcePackageSites.value, sourcePageQuery.value, sourcePageFilter.value));
 const sourcePickerGroups = computed<SourcePickerGroup[]>(() => buildSourcePickerGroups(
-  selectableSites.value,
+  activeSourcePackageSites.value,
   favoriteSourceSites.value,
   recentSourceSites.value,
   sourcePickerQuery.value,
@@ -560,8 +585,17 @@ const searchEmptyState = computed(() => resolveSearchEmptyState({
 const sourceAuditProgress = computed(() => sourceAuditStatus.value.total > 0
   ? Math.round((sourceAuditStatus.value.completed / sourceAuditStatus.value.total) * 100)
   : 0);
-const hiddenQualityCount = computed(() => unsupportedSites.value.length);
-const pendingQualityCount = computed(() => supportedSites.value.filter((site) => site.quality?.state !== "healthy").length);
+const recommendedSourceCount = computed(() => selectableSites.value.filter((site) => isRecommendedSource(site)).length);
+const sourceOverviewTitle = computed(() => {
+  if (recommendedSourceCount.value > 0) return `${recommendedSourceCount.value} 个推荐源`;
+  if (selectableSites.value.length > 0) return `${selectableSites.value.length} 个可尝试源`;
+  return "暂无可用源";
+});
+const sourceOverviewSubtitle = computed(() => {
+  if (sites.value.length === 0) return "尚未载入播放源";
+  if (selectableSites.value.length === 0) return "当前没有桌面端可用来源";
+  return `${selectableSites.value.length} 个桌面端可用来源`;
+});
 const fontSizeClass = computed(() => resolveFontSizeClass(fontSize.value));
 const resolvedTheme = computed<"dark" | "light">(() => themeMode.value === "system"
   ? (systemPrefersDark.value ? "dark" : "light")
@@ -574,9 +608,12 @@ const externalPlayerLabel = computed(() => externalPlayerPreference.value === "i
   : externalPlayerPreference.value === "vlc"
     ? "VLC"
     : "系统播放器");
-const heroStyle = computed(() => hero.value?.vodPic ? {
+const heroHasImage = computed(() => hasUsableImage(hero.value?.vodPic));
+const heroStyle = computed(() => heroHasImage.value && hero.value?.vodPic ? {
   backgroundImage: `linear-gradient(90deg, rgba(11,14,21,.98) 0%, rgba(11,14,21,.82) 42%, rgba(11,14,21,.18) 100%), url("${hero.value.vodPic}")`,
-} : {});
+} : {
+  backgroundImage: `linear-gradient(90deg, rgba(11,14,21,.96), rgba(11,14,21,.38)), radial-gradient(circle at 70% 30%, rgba(72,118,220,.45), transparent 35%)`,
+});
 
 const runtimeNames: Record<string, string> = {
   http: "HTTP",
@@ -714,8 +751,27 @@ function sourceDescription(site: Site): string {
   return "影视内容来源";
 }
 
+function isRecommendedSource(site: Site): boolean {
+  const quality = site.quality;
+  if (!quality) return false;
+  if (quality.state === "healthy") return true;
+  const lastMediaSuccessAt = Number(quality.lastMediaSuccessAt ?? 0);
+  return lastMediaSuccessAt > Date.now() - 30 * 24 * 60 * 60 * 1_000;
+}
+
 function sourceStatusText(site: Site): string {
-  return sourceQualityLabel(site);
+  if (activeSite.value === site.key) return "当前";
+  if (!site.supported) return "不可用";
+  if (site.quality?.state === "checking") return "检测中";
+  if (isRecommendedSource(site)) return "推荐";
+  return "可尝试";
+}
+
+function sourceStatusClass(site: Site): string {
+  if (!site.supported) return "unavailable";
+  if (site.quality?.state === "checking") return "checking";
+  if (isRecommendedSource(site)) return "recommended";
+  return "trial";
 }
 
 function filterSourceSites(values: Site[], query: string, filter: SourceQuickGroup): Site[] {
@@ -794,6 +850,38 @@ function selectSource(siteKey: string): void {
 function toggleSourcePicker(force?: boolean): void {
   sourcePickerOpen.value = force ?? !sourcePickerOpen.value;
   if (!sourcePickerOpen.value) sourcePickerQuery.value = "";
+}
+
+function normalizedImageUrl(value?: string): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hasUsableImage(value?: string): boolean {
+  const url = normalizedImageUrl(value);
+  return Boolean(url) && !brokenImageUrls.value.has(url);
+}
+
+function markImageBroken(value?: string): void {
+  const url = normalizedImageUrl(value);
+  if (!url || brokenImageUrls.value.has(url)) return;
+  brokenImageUrls.value = new Set([...brokenImageUrls.value, url]);
+}
+
+function posterFallbackClass(title?: string): string {
+  const value = title?.trim() || "影视";
+  let hash = 0;
+  for (const character of value) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
+  return `fallback-variant-${Math.abs(hash) % 6}`;
+}
+
+function resetHomeContent(): void {
+  homeItems.value = [];
+  homeRecommendations.value = [];
+  homeMovieSourceItems.value = [];
+  homeTvSourceItems.value = [];
+  homeLoadedSiteKey.value = "";
+  heroIndex.value = 0;
+  clearHeroRotation();
 }
 
 function clearErrorState(): void {
@@ -1133,35 +1221,33 @@ async function loadHomeCategorySections(siteKey: string, categoriesValue: unknow
   homeTvSourceItems.value = candidates.tv.filter((item) => !excluded.has(homeItemIdentity(item))).slice(0, 6);
 }
 
-async function loadHome() {
+async function loadHome(siteKey = activeSite.value) {
   const requestId = ++homeLoadRequestId;
+  const requestedSiteKey = siteKey;
+  resetHomeContent();
   if (!sites.value.length) {
-    homeItems.value = [];
-    homeRecommendations.value = [];
-    homeMovieSourceItems.value = [];
-    homeTvSourceItems.value = [];
-    clearHeroRotation();
+    homeLoading.value = false;
     return;
   }
+
   homeLoading.value = true;
   clearErrorState();
   try {
-    const response = window.tvApi.bestHome
-      ? await window.tvApi.bestHome()
-      : activeSite.value ? await window.tvApi.home(activeSite.value) : { siteKey: "", list: [] };
+    const response = requestedSiteKey
+      ? await window.tvApi.home(requestedSiteKey)
+      : window.tvApi.bestHome
+        ? await window.tvApi.bestHome()
+        : { siteKey: "", list: [] };
     if (requestId !== homeLoadRequestId) return;
-    const resolvedSiteKey = response?.siteKey || activeSite.value;
+    const resolvedSiteKey = response?.siteKey || requestedSiteKey;
+    homeLoadedSiteKey.value = resolvedSiteKey;
     homeItems.value = dedupeLibraryItems(annotate(response?.list ?? [], resolvedSiteKey));
     updateHomeRecommendations(homeItems.value, resolvedSiteKey);
     void loadHomeCategorySections(resolvedSiteKey, response?.categories, requestId);
     if (!homeItems.value.length && response?.message) showUserError(response.message, "home");
   } catch (e) {
     if (requestId !== homeLoadRequestId) return;
-    homeItems.value = [];
-    homeRecommendations.value = [];
-    homeMovieSourceItems.value = [];
-    homeTvSourceItems.value = [];
-    clearHeroRotation();
+    resetHomeContent();
     showRendererError(e, "home");
   } finally {
     if (requestId === homeLoadRequestId) homeLoading.value = false;
@@ -1213,23 +1299,81 @@ async function startSourceAudit(force = false) {
   }
 }
 
-async function loadConfig(source = configUrl.value.trim(), name = configName.value.trim() || inferConfigName(source)) {
-  if (!source) return;
+function sourceImportLabel(request: PendingSourceImport): string {
+  return request.catVodBundle ? inferCatVodSourceLabel(request.source) : request.name;
+}
+
+function resetSourceSelectionFilters(): void {
+  sourcePickerFilter.value = "all";
+  sourcePickerQuery.value = "";
+  sourcePageFilter.value = "all";
+  sourcePageQuery.value = "";
+}
+
+async function applySourceImport(request: PendingSourceImport): Promise<void> {
   loading.value = true;
   clearErrorState();
   try {
-    await window.tvApi.loadConfig(source, name);
-    configUrl.value = "";
-    configName.value = "";
+    if (request.catVodBundle) {
+      catVodMd5Url.value = request.source;
+      catVodStatus.value = await window.tvApi.startCatVod(request.source, catVodRemoteAccessPolicy.value);
+    } else {
+      await window.tvApi.loadConfig(request.source, request.name);
+    }
     await Promise.all([refreshSites(), loadConfigs()]);
-    await loadHome();
+    const importedSiteKey = request.catVodBundle
+      ? selectCatVodSiteAfterImport(catVodSourceSites.value.map((site) => site.key), request.previousActiveSite)
+      : selectConfigSiteAfterImport(ordinarySourceSites.value.map((site) => site.key), request.previousActiveSite);
+    if (importedSiteKey) {
+      activeSite.value = importedSiteKey;
+      rememberSource(importedSiteKey);
+    }
+    resetSourceSelectionFilters();
+    const importedPackageLabel = sourceImportLabel(request);
+    contentSourceMessage.value = importedSiteKey
+      ? `已启用 ${importedPackageLabel}，当前播放源为 ${activeSiteRecord.value?.name ?? "首个可用来源"}`
+      : `已启用 ${importedPackageLabel}，但没有发现可用影视来源`;
+    await loadHome(activeSite.value);
     void startSourceAudit(false);
     page.value = "home";
   } catch (e) {
-    showRendererError(e, "config");
+    showRendererError(e, request.catVodBundle ? "catvod" : "config");
   } finally {
     loading.value = false;
   }
+}
+
+async function applyPendingSourceImport(): Promise<void> {
+  const request = pendingSourceImport.value;
+  if (!request || playing.value) return;
+  pendingSourceImport.value = null;
+  await applySourceImport(request);
+}
+
+function cancelPendingSourceImport(): void {
+  if (!pendingSourceImport.value) return;
+  const label = sourceImportLabel(pendingSourceImport.value);
+  pendingSourceImport.value = null;
+  contentSourceMessage.value = `已取消切换到 ${label}`;
+}
+
+async function loadConfig(source = configUrl.value.trim(), name = configName.value.trim() || inferConfigName(source)) {
+  if (!source) return;
+  const request: PendingSourceImport = {
+    source,
+    name,
+    catVodBundle: isCatVodBundleSource(source),
+    previousActiveSite: activeSite.value,
+  };
+  configUrl.value = "";
+  configName.value = "";
+  if (playing.value) {
+    pendingSourceImport.value = request;
+    contentSourceMessage.value = `${sourceImportLabel(request)} 已加入切换队列，当前视频关闭或播放完成后自动启用`;
+    return;
+  }
+  pendingSourceImport.value = null;
+  await applySourceImport(request);
 }
 
 async function activateConfig(config: ConfigRecord) {
@@ -1860,6 +2004,51 @@ async function resolveAlternativeSourcePlayback(
   return undefined;
 }
 
+function playbackEnginePreferenceKey(siteKey: string, flag: string, episodeUrl: string): string {
+  return `${siteKey}\u0000${flag}\u0000${episodeUrl}`;
+}
+
+function effectivePlaybackMode(siteKey: string, flag: string, episodeUrl: string): PlaybackMode {
+  if (playbackMode.value !== "auto") return playbackMode.value;
+  return playbackEnginePreferences.value[playbackEnginePreferenceKey(siteKey, flag, episodeUrl)]?.engine === "compatibility"
+    ? "compatibility"
+    : "auto";
+}
+
+async function rememberCompatibilityPlayback(siteKey: string, flag: string, episodeUrl: string): Promise<void> {
+  const key = playbackEnginePreferenceKey(siteKey, flag, episodeUrl);
+  const nextEntries = Object.entries({
+    ...playbackEnginePreferences.value,
+    [key]: { engine: "compatibility" as const, updatedAt: Date.now() },
+  })
+    .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+    .slice(0, 300);
+  playbackEnginePreferences.value = Object.fromEntries(nextEntries);
+  await window.tvApi.setSetting("playbackEnginePreferences", playbackEnginePreferences.value).catch(() => undefined);
+}
+
+async function clearPlaybackEnginePreferences(): Promise<void> {
+  playbackEnginePreferences.value = {};
+  await window.tvApi.setSetting("playbackEnginePreferences", {});
+  playbackStatus.value = "已清除高兼容播放记忆，后续将重新智能判断播放方式。";
+}
+
+function normalizePlaybackEnginePreferences(value: unknown): Record<string, PlaybackEnginePreference> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, raw]) => {
+      if (!key || !raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+      const record = raw as Record<string, unknown>;
+      if (record.engine !== "compatibility") return undefined;
+      const updatedAt = Number(record.updatedAt);
+      return [key, { engine: "compatibility" as const, updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0 }] as const;
+    })
+    .filter((entry): entry is readonly [string, PlaybackEnginePreference] => entry !== undefined)
+    .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+    .slice(0, 300);
+  return Object.fromEntries(entries);
+}
+
 async function play(
   flag: string,
   episode: Episode,
@@ -1885,6 +2074,7 @@ async function play(
       vodId: item.vodId,
       vodName: item.vodName,
       episodeName: episode.name,
+      playbackMode: effectivePlaybackMode(item.siteKey, flag, episode.url),
     });
     preparedSessionId = prepared.sessionId;
     if (requestId !== playbackRequestId) {
@@ -1904,25 +2094,12 @@ async function play(
       updatedAt: Date.now(),
     });
 
-    if (prepared.engine === "mpv") {
-      compatibilityPlaybackContext = {
-        item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
-        flag,
-        episode: { ...episode },
-        started: false,
-        position: Math.max(0, startPosition),
-        duration: 0,
-      };
-      await window.tvApi.fallbackPlayback(prepared.sessionId);
-      await window.tvApi.setSpeed?.(Number(defaultSpeed.value));
-      if (startPosition > 0) await window.tvApi.seek(startPosition);
-      await window.tvApi.closePlayback(prepared.sessionId);
-      playbackStatus.value = "已自动使用高兼容播放器。";
-      await loadLibrary(false);
-      return;
-    }
-
     selectedFlag.value = flag;
+    latestPlaybackProgress.value = {
+      position: Math.max(0, startPosition),
+      duration: selectedHistory.value?.episodeUrl === episode.url ? selectedHistory.value.duration : 0,
+      completed: false,
+    };
     playing.value = {
       ...prepared,
       flag,
@@ -1934,15 +2111,14 @@ async function play(
       startPosition: Math.max(0, startPosition),
     };
     paused.value = false;
-    playbackStatus.value = prepared.resolvedBy === "browser-sniffer" ? "已通过网页嗅探获得媒体地址" : "";
+    playbackStatus.value = prepared.engine === "mpv"
+      ? playbackEnginePreferences.value[playbackEnginePreferenceKey(item.siteKey, flag, episode.url)]
+        ? "已根据该线路历史表现优先使用高兼容播放模式。"
+        : "当前线路已使用高兼容播放模式。"
+      : prepared.resolvedBy === "browser-sniffer" ? "已通过网页嗅探获得媒体地址" : "";
     await loadLibrary(false);
   } catch (e) {
     if (requestId !== playbackRequestId) return;
-    if (compatibilityPlaybackContext?.item.siteKey === item.siteKey
-      && compatibilityPlaybackContext.flag === flag
-      && compatibilityPlaybackContext.episode.url === episode.url) {
-      compatibilityPlaybackContext = undefined;
-    }
     playbackStatus.value = "";
     const panProvider = playbackNeedsPanLogin(e) ? detectPanPlaybackProvider(item, flag, episode) : undefined;
     if (panProvider) {
@@ -1992,12 +2168,8 @@ async function play(
       : attemptedLineCount
         ? `已自动尝试 ${attemptedLineCount} 条线路，仍未成功。${failureMessage}`
         : failureMessage;
-    if (preparedSessionId) {
-      externalFallbackSessionId.value = preparedSessionId;
-      showRendererError(e, "playback", `${recoveryMessage} 可以使用外部播放器进行最后尝试。`);
-    } else {
-      showRendererError(e, "playback", recoveryMessage);
-    }
+    if (preparedSessionId) await window.tvApi.closePlayback(preparedSessionId).catch(() => undefined);
+    showRendererError(e, "playback", `${recoveryMessage} 应用将只使用内置播放器，请切换线路、切换来源或重试。`);
     if (playbackFailureAffectsSource(e)) await refreshSites().catch(() => undefined);
   } finally {
     if (requestId === playbackRequestId) sniffing.value = false;
@@ -2048,6 +2220,7 @@ async function cancelSniff() {
 }
 
 async function saveEmbeddedProgress(progress: PlaybackProgress) {
+  latestPlaybackProgress.value = { ...progress };
   const current = playing.value;
   if (!current) return;
   await window.tvApi.saveHistory({
@@ -2065,6 +2238,15 @@ async function saveEmbeddedProgress(progress: PlaybackProgress) {
 
 async function handleEmbeddedEnded(progress: PlaybackProgress) {
   await saveEmbeddedProgress(progress);
+  if (pendingSourceImport.value) {
+    const current = playing.value;
+    if (current) await window.tvApi.closePlayback(current.sessionId);
+    playing.value = null;
+    paused.value = false;
+    await loadLibrary(false);
+    await applyPendingSourceImport();
+    return;
+  }
   const next = playingNavigation.value?.next;
   if (autoNextEpisode.value && next) {
     playbackStatus.value = `本集播放完成，正在自动播放 ${next.name}…`;
@@ -2072,38 +2254,6 @@ async function handleEmbeddedEnded(progress: PlaybackProgress) {
   }
 }
 
-async function handleCompatibilityPlayerState(state: { position?: number; duration?: number; stopped?: boolean }) {
-  const context = compatibilityPlaybackContext;
-  if (!context) return;
-  if (Number.isFinite(state.position)) context.position = Math.max(0, Number(state.position));
-  if (Number.isFinite(state.duration)) context.duration = Math.max(0, Number(state.duration));
-  if (state.stopped !== true) {
-    context.started = true;
-    return;
-  }
-  if (!context.started) return;
-  compatibilityPlaybackContext = undefined;
-  await window.tvApi.saveHistory({
-    siteKey: context.item.siteKey,
-    vodId: context.item.vodId,
-    vodName: context.item.vodName,
-    episodeName: context.episode.name,
-    episodeUrl: context.episode.url,
-    flag: context.flag,
-    position: context.position,
-    duration: context.duration,
-    updatedAt: Date.now(),
-  });
-  const completed = context.duration > 0
-    && (context.position / context.duration >= 0.95 || context.duration - context.position <= 90);
-  if (!autoNextEpisode.value || !completed) return;
-  const navigation = resolveEpisodeNavigation(context.item.flags, context.flag, context.episode.url);
-  if (!navigation?.next) return;
-  selected.value = context.item;
-  selectedFlag.value = context.flag;
-  playbackStatus.value = `本集播放完成，正在自动播放 ${navigation.next.name}…`;
-  await play(context.flag, navigation.next, 0);
-}
 
 async function switchEmbeddedEpisode(episodeUrl: string, progress: PlaybackProgress) {
   const current = playing.value;
@@ -2141,6 +2291,18 @@ async function closeEmbeddedPlayback(progress: PlaybackProgress) {
   playing.value = null;
   paused.value = false;
   await loadLibrary(false);
+  await applyPendingSourceImport();
+}
+
+async function stopPlaybackAndApplyPendingSource(): Promise<void> {
+  const current = playing.value;
+  if (!current || !pendingSourceImport.value || loading.value) return;
+  await saveEmbeddedProgress(latestPlaybackProgress.value);
+  await window.tvApi.closePlayback(current.sessionId);
+  playing.value = null;
+  paused.value = false;
+  await loadLibrary(false);
+  await applyPendingSourceImport();
 }
 
 async function handleWebPlayerEngineFallback(reason: string) {
@@ -2152,35 +2314,16 @@ async function handleWebPlayerEngineFallback(reason: string) {
 async function fallbackEmbeddedPlayback(progress: PlaybackProgress) {
   const current = playing.value;
   if (!current) return;
-  let keepSessionForExternal = false;
-  try {
-    await saveEmbeddedProgress(progress);
-    const item = selected.value;
-    if (item) {
-      compatibilityPlaybackContext = {
-        item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
-        flag: current.flag,
-        episode: { name: current.episode, url: current.episodeUrl },
-        started: false,
-        position: progress.position,
-        duration: progress.duration,
-      };
-    }
-    await window.tvApi.fallbackPlayback(current.sessionId);
-    await window.tvApi.setSpeed?.(Number(defaultSpeed.value));
-    if (progress.position > 0) await window.tvApi.seek(progress.position);
-    playbackStatus.value = "已切换到高兼容播放器，并从当前进度继续播放。";
-  } catch (e) {
-    compatibilityPlaybackContext = undefined;
-    keepSessionForExternal = true;
-    externalFallbackSessionId.value = current.sessionId;
-    showRendererError(e, "playback", `${playbackFailureMessage(e)} 可以使用外部播放器进行最后尝试。`);
-  } finally {
-    if (!keepSessionForExternal) await window.tvApi.closePlayback(current.sessionId);
-    playing.value = null;
-    paused.value = false;
-    await loadLibrary(false);
-  }
+  await saveEmbeddedProgress(progress);
+  await rememberCompatibilityPlayback(current.siteKey, current.flag, current.episodeUrl);
+  playing.value = {
+    ...current,
+    engine: "mpv",
+    startPosition: Math.max(0, progress.position),
+  };
+  paused.value = false;
+  playbackStatus.value = "标准播放模式无法正常加载，已切换到高兼容播放模式。";
+  await loadLibrary(false);
 }
 
 async function refreshSourceStatus() {
@@ -2202,20 +2345,6 @@ async function refreshSourceStatus() {
   } finally {
     checkingSite.value = "";
   }
-}
-
-function sourceStatusLabel(site: Site) {
-  if (site.quality?.state === "checking") return "检测中";
-  if (site.quality?.state === "healthy") return "已验证可播";
-  if (!site.supported || site.quality?.state === "blocked") return "已屏蔽";
-  if (site.quality?.state === "degraded") return "可尝试";
-  return "待验证";
-}
-
-function sourceStatusClass(site: Site) {
-  if (!site.supported || site.quality?.state === "blocked") return "error";
-  if (site.quality?.state === "healthy") return "success";
-  return "warning";
 }
 
 async function loadLibrary(changePage = false) {
@@ -2580,6 +2709,8 @@ async function saveSettings() {
     await window.tvApi.setSetting("linePreference", linePreference.value);
     await window.tvApi.setSetting("autoFallbackLine", autoFallbackLine.value);
     await window.tvApi.setSetting("compatibilityFallbackMode", compatibilityFallbackMode.value);
+    await window.tvApi.setSetting("playbackMode", playbackMode.value);
+    await window.tvApi.setSetting("nativeLibmpvEnabled", nativeLibmpvEnabled.value);
     await window.tvApi.setSetting("webPlayerEngine", webPlayerEngine.value);
     await window.tvApi.setSetting("autoFallbackSource", autoFallbackSource.value);
     await window.tvApi.setSetting("autoNextEpisode", autoNextEpisode.value);
@@ -2597,6 +2728,8 @@ async function saveSettings() {
       ["linePreference", linePreference.value],
       ["autoFallbackLine", autoFallbackLine.value],
       ["compatibilityFallbackMode", compatibilityFallbackMode.value],
+      ["playbackMode", playbackMode.value],
+      ["nativeLibmpvEnabled", nativeLibmpvEnabled.value],
       ["webPlayerEngine", webPlayerEngine.value],
       ["autoFallbackSource", autoFallbackSource.value],
       ["autoNextEpisode", autoNextEpisode.value],
@@ -2623,18 +2756,25 @@ async function saveSettings() {
 watch(homeCarouselEnabled, () => scheduleHeroRotation());
 watch(resolvedTheme, applyResolvedTheme, { immediate: true });
 watch(page, (next) => {
-  if (next === "home") scheduleHeroRotation();
-  else clearHeroRotation();
+  if (next === "home") {
+    scheduleHeroRotation();
+    if (!homeLoading.value && homeLoadedSiteKey.value !== activeSite.value) void loadHome(activeSite.value);
+  } else {
+    clearHeroRotation();
+  }
 });
 
 watch(activeSite, async (next, previous) => {
   if (next === previous || restoringInitialSite) return;
   rememberSource(next);
+  const homeRefresh = page.value === "home" ? loadHome(next) : undefined;
+  if (!homeRefresh) resetHomeContent();
   await window.tvApi.setSetting("defaultSite", next);
   libraryCategory.value = "all";
   libraryFilters.value = {};
   libraryFiltersByCategory.value = {};
   libraryItems.value = [];
+  if (homeRefresh) await homeRefresh;
   if (page.value === "library") await loadSourceHome();
 });
 
@@ -2648,12 +2788,6 @@ onMounted(async () => {
   window.addEventListener("blur", handleHeroWindowBlur);
   if (window.tvApi.onIncrementalSearchEvent) {
     removeIncrementalSearchEvent = window.tvApi.onIncrementalSearchEvent(handleIncrementalSearchEvent);
-  }
-  if (window.tvApi.onPlayerState) {
-    removePlayerStateEvent = window.tvApi.onPlayerState((state: unknown) => {
-      if (typeof state !== "object" || state === null || Array.isArray(state)) return;
-      void handleCompatibilityPlayerState(state as { position?: number; duration?: number; stopped?: boolean });
-    });
   }
   try {
     recentSearches.value = JSON.parse(window.localStorage.getItem("fongmi-recent-searches") ?? "[]");
@@ -2685,6 +2819,11 @@ onMounted(async () => {
     autoFallbackLine.value = await window.tvApi.getSetting("autoFallbackLine", true) !== false;
     compatibilityFallbackMode.value = normalizeCompatibilityFallbackMode(
       await window.tvApi.getSetting("compatibilityFallbackMode", "automatic"),
+    );
+    playbackMode.value = normalizePlaybackMode(await window.tvApi.getSetting("playbackMode", "auto"));
+    nativeLibmpvEnabled.value = await window.tvApi.getSetting("nativeLibmpvEnabled", true) !== false;
+    playbackEnginePreferences.value = normalizePlaybackEnginePreferences(
+      await window.tvApi.getSetting("playbackEnginePreferences", {}),
     );
     webPlayerEngine.value = normalizeWebPlayerEngine(
       await window.tvApi.getSetting("webPlayerEngine", "legacy"),
@@ -2723,7 +2862,10 @@ onMounted(async () => {
         } else if (action === "danmuPush") {
           playbackStatus.value = "CatVod 已推送弹幕信息，播放器将在支持时加载。";
         } else if (action === "serviceUpdated") {
-          void Promise.all([refreshCatVodStatus(), refreshSites()]).then(() => loadHome());
+          void Promise.all([refreshCatVodStatus(), refreshSites()]).then(async () => {
+            await loadHome();
+            await startSourceAudit(false);
+          });
         } else if (action === "serviceError") {
           catVodMessage.value = `CatVod 启动失败：${String(event.message ?? "未知错误")}`;
         }
@@ -2760,8 +2902,6 @@ onBeforeUnmount(() => {
   removeIncrementalSearchEvent = undefined;
   removeCatVodHostEvent?.();
   removeCatVodHostEvent = undefined;
-  removePlayerStateEvent?.();
-  removePlayerStateEvent = undefined;
 });
 </script>
 
@@ -2799,8 +2939,8 @@ onBeforeUnmount(() => {
       <div class="sidebar-status">
         <span class="status-dot" :class="{ offline: supportedSites.length === 0 }"></span>
         <div>
-          <strong>{{ supportedSites.length }} 个源可用</strong>
-          <span>{{ sites.length }} 个播放源已载入</span>
+          <strong>{{ sourceOverviewTitle }}</strong>
+          <span>{{ sourceOverviewSubtitle }}</span>
         </div>
       </div>
     </aside>
@@ -2823,7 +2963,7 @@ onBeforeUnmount(() => {
 
         <button class="source-picker-trigger" :class="{ open: sourcePickerOpen }" aria-label="选择播放源" @click="toggleSourcePicker()">
           <span class="source-picker-trigger-dot" :class="{ offline: !activeSiteRecord }"></span>
-          <span class="source-picker-trigger-copy"><small>当前播放源</small><strong>{{ activeSiteRecord?.name ?? '暂无可用播放源' }}</strong></span>
+          <span class="source-picker-trigger-copy"><small>当前播放源 · {{ activeSourcePackageLabel }}</small><strong>{{ activeSiteRecord?.name ?? '暂无可用播放源' }}</strong></span>
           <AppIcon name="chevron" :size="15" />
         </button>
       </header>
@@ -2831,6 +2971,11 @@ onBeforeUnmount(() => {
       <button v-if="sourcePickerOpen" class="source-picker-backdrop" aria-label="关闭播放源选择器" @click="toggleSourcePicker(false)"></button>
       <aside v-if="sourcePickerOpen" class="source-picker-panel" aria-label="播放源选择器">
         <div class="source-picker-heading"><div><small>QUICK SOURCE</small><h2>选择播放源</h2></div><button class="icon-button" title="关闭" @click="toggleSourcePicker(false)"><AppIcon name="close" :size="17" /></button></div>
+        <div class="source-picker-context">
+          <span class="source-live-dot"></span>
+          <span><small>当前来源包</small><strong>{{ activeSourcePackageLabel }}</strong></span>
+          <em>{{ activeSourcePackageSiteCount }} 个可用影视源</em>
+        </div>
         <label class="source-picker-search"><AppIcon name="search" :size="17" /><input v-model="sourcePickerQuery" autofocus placeholder="搜索来源，例如：玩偶、4K、韩剧" /></label>
         <div class="source-picker-tabs">
           <button v-for="item in [{ key: 'all', label: '全部' }, { key: 'favorite', label: '收藏' }, { key: 'recent', label: '最近使用' }, { key: '4k', label: '4K' }, { key: 'quick', label: '秒播' }, { key: 'collect', label: '采集' }] as const" :key="item.key" :class="{ active: sourcePickerFilter === item.key }" @click="sourcePickerFilter = item.key">{{ item.label }}</button>
@@ -2841,12 +2986,12 @@ onBeforeUnmount(() => {
             <button v-for="site in group.items" :key="site.key" class="source-picker-item" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
               <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
               <span class="source-picker-item-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-              <span class="source-picker-status-stack"><span v-if="activeSite === site.key" class="source-current-label">当前</span><span v-else class="source-available-label">{{ sourceStatusText(site) }}</span><span class="source-favorite-toggle" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span></span>
+              <span class="source-picker-status-stack"><span v-if="activeSite === site.key" class="source-current-label">当前</span><span v-else class="source-available-label" :class="sourceStatusClass(site)">{{ sourceStatusText(site) }}</span><span class="source-favorite-toggle" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span></span>
             </button>
           </section>
         </div>
         <div v-else class="source-picker-empty"><AppIcon name="search" :size="24" /><strong>没有找到匹配来源</strong><span>尝试更换关键词或分类</span></div>
-        <div class="source-picker-footer">只展示可用影视来源，服务配置和异常检测已移至设置。</div>
+        <div class="source-picker-footer">当前来源包：{{ activeSourcePackageLabel }}。列表只展示其中可用的影视播放源。</div>
       </aside>
 
       <div v-if="displayedError" class="global-message error-message" :class="{ expanded: errorTechnicalOpen }">
@@ -2858,7 +3003,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="message-actions">
           <button v-if="recoveryCandidate" class="message-action" @click="searchAlternativeSources">查找其他来源</button>
-          <button v-if="externalFallbackSessionId" class="message-action" :disabled="Boolean(externalFallbackLoading)" @click="openExternalPlayback(externalPlayerPreference)">{{ externalFallbackLoading ? '正在打开…' : `使用${externalPlayerLabel}` }}</button>
+
           <button v-if="displayedError.recoveryAction" class="message-action" :disabled="loading || homeLoading || libraryLoading || panStatusLoading || checkingSite === '__all__'" @click="runErrorRecovery">{{ displayedError.recoveryLabel }}</button>
           <button @click="dismissError"><AppIcon name="close" :size="16" /></button>
         </div>
@@ -2873,7 +3018,14 @@ onBeforeUnmount(() => {
 
       <main class="content" :class="{ 'with-player': playing }">
         <section v-if="page === 'home'" class="page home-page redesigned-home">
-          <div v-if="hero" class="hero home-featured home-carousel" :style="heroStyle" @mouseenter="setHeroHovered(true)" @mouseleave="setHeroHovered(false)">
+          <div v-if="homeLoading" class="hero hero-loading">
+            <div class="loading-spinner"></div>
+            <strong>正在加载 {{ activeSiteName }} 的首页内容</strong>
+            <span>切换来源后，推荐、电影和电视剧会同步刷新。</span>
+          </div>
+
+          <div v-else-if="hero" class="hero home-featured home-carousel" :class="{ 'without-image': !heroHasImage }" :style="heroStyle" @mouseenter="setHeroHovered(true)" @mouseleave="setHeroHovered(false)">
+            <img v-if="heroHasImage" class="image-load-probe" :src="hero.vodPic" alt="" @error="markImageBroken(hero.vodPic)" />
             <div class="hero-content">
               <div class="featured-label">最近热播</div>
               <h1>{{ hero.vodName }}</h1>
@@ -2914,8 +3066,9 @@ onBeforeUnmount(() => {
             </div>
             <div class="continue-row continue-poster-row">
               <button v-for="item in continueItems" :key="`${item.siteKey}:${item.vodId}:${item.episodeName}`" class="continue-card continue-landscape-card" @click="openAndPlay(item, 'home')">
-                <div class="continue-cover" :style="item.vodPic ? { backgroundImage: `linear-gradient(0deg, rgba(5,8,13,.92), rgba(5,8,13,.05) 72%), url(${item.vodPic})` } : {}">
-                  <div v-if="!item.vodPic" class="continue-cover-fallback"><AppIcon name="film" :size="28" /></div>
+                <div class="continue-cover" :style="hasUsableImage(item.vodPic) ? { backgroundImage: `linear-gradient(0deg, rgba(5,8,13,.92), rgba(5,8,13,.05) 72%), url(${item.vodPic})` } : {}">
+                  <img v-if="hasUsableImage(item.vodPic)" class="image-load-probe" :src="item.vodPic" alt="" @error="markImageBroken(item.vodPic)" />
+                  <div v-if="!hasUsableImage(item.vodPic)" class="continue-cover-fallback" :class="posterFallbackClass(item.vodName)"><AppIcon name="film" :size="28" /></div>
                   <div class="continue-overlay-copy"><strong>{{ item.vodName }}</strong><span>{{ item.episodeName }}</span></div>
                   <i><b :style="{ width: `${progressPercent(item)}%` }"></b></i>
                   <em>{{ Math.round(progressPercent(item)) }}%</em>
@@ -2932,7 +3085,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="poster-grid home-compact-grid">
                 <button v-for="item in homeMovieItems" :key="`${item.siteKey}:${item.vodId}`" class="poster-card" @click="openDetail(item, 'home')">
-                  <div class="poster-image"><img v-if="item.vodPic" :src="item.vodPic" :alt="item.vodName" loading="lazy" /><div v-else class="poster-fallback">{{ item.vodName.slice(0, 1) }}</div><span v-if="item.vodRemarks" class="poster-badge">{{ item.vodRemarks }}</span><div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div></div>
+                  <div class="poster-image"><img v-if="hasUsableImage(item.vodPic)" :src="item.vodPic" :alt="item.vodName" loading="lazy" @error="markImageBroken(item.vodPic)" /><div v-else class="poster-fallback" :class="posterFallbackClass(item.vodName)"><AppIcon name="film" :size="30" /><span>{{ item.vodName.slice(0, 1) }}</span></div><span v-if="item.vodRemarks" class="poster-badge">{{ item.vodRemarks }}</span><div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div></div>
                   <strong>{{ item.vodName }}</strong><span>{{ item.vodYear || item.typeName || activeSiteName }}</span>
                 </button>
               </div>
@@ -2945,7 +3098,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="poster-grid home-compact-grid">
                 <button v-for="item in homeTvItems" :key="`${item.siteKey}:${item.vodId}`" class="poster-card" @click="openDetail(item, 'home')">
-                  <div class="poster-image"><img v-if="item.vodPic" :src="item.vodPic" :alt="item.vodName" loading="lazy" /><div v-else class="poster-fallback">{{ item.vodName.slice(0, 1) }}</div><span v-if="item.vodRemarks" class="poster-badge">{{ item.vodRemarks }}</span><div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div></div>
+                  <div class="poster-image"><img v-if="hasUsableImage(item.vodPic)" :src="item.vodPic" :alt="item.vodName" loading="lazy" @error="markImageBroken(item.vodPic)" /><div v-else class="poster-fallback" :class="posterFallbackClass(item.vodName)"><AppIcon name="film" :size="30" /><span>{{ item.vodName.slice(0, 1) }}</span></div><span v-if="item.vodRemarks" class="poster-badge">{{ item.vodRemarks }}</span><div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div></div>
                   <strong>{{ item.vodName }}</strong><span>{{ item.vodYear || item.typeName || activeSiteName }}</span>
                 </button>
               </div>
@@ -2999,7 +3152,7 @@ onBeforeUnmount(() => {
 
           <div v-if="visibleLibraryItems.length" class="poster-grid full-library-grid">
             <button v-for="item in visibleLibraryItems" :key="`${item.siteKey}:${item.vodId}`" class="poster-card library-poster-card" @click="openDetail(item, 'library')">
-              <div class="poster-image"><img v-if="item.vodPic" :src="item.vodPic" :alt="item.vodName" loading="lazy" /><div v-else class="poster-fallback">{{ item.vodName.slice(0, 1) }}</div><span v-if="item.vodRemarks" class="poster-badge">{{ item.vodRemarks }}</span><div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div></div>
+              <div class="poster-image"><img v-if="hasUsableImage(item.vodPic)" :src="item.vodPic" :alt="item.vodName" loading="lazy" @error="markImageBroken(item.vodPic)" /><div v-else class="poster-fallback" :class="posterFallbackClass(item.vodName)"><AppIcon name="film" :size="30" /><span>{{ item.vodName.slice(0, 1) }}</span></div><span v-if="item.vodRemarks" class="poster-badge">{{ item.vodRemarks }}</span><div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div></div>
               <strong>{{ item.vodName }}</strong><span>{{ [item.vodYear, item.typeName].filter(Boolean).join(' · ') || item.siteName || activeSiteName }}</span>
             </button>
           </div>
@@ -3043,7 +3196,7 @@ onBeforeUnmount(() => {
 
           <div v-if="searchGroups.length" class="search-result-grid">
             <article v-for="group in searchGroups" :key="group.key" class="search-result-card">
-              <div class="search-result-poster"><img v-if="group.primary.vodPic" :src="group.primary.vodPic" :alt="group.primary.vodName" /><div v-else class="poster-fallback">{{ group.primary.vodName.slice(0, 1) }}</div></div>
+              <div class="search-result-poster"><img v-if="hasUsableImage(group.primary.vodPic)" :src="group.primary.vodPic" :alt="group.primary.vodName" @error="markImageBroken(group.primary.vodPic)" /><div v-else class="poster-fallback" :class="posterFallbackClass(group.primary.vodName)"><AppIcon name="film" :size="28" /><span>{{ group.primary.vodName.slice(0, 1) }}</span></div></div>
               <div class="search-result-copy">
                 <h3>{{ group.primary.vodName }}</h3>
                 <p v-if="folderTrail.length">{{ folderItemTypeLabel(group.primary) }}<template v-if="group.primary.vodRemarks"> · {{ group.primary.vodRemarks }}</template></p>
@@ -3071,13 +3224,13 @@ onBeforeUnmount(() => {
         </section>
 
         <section v-else-if="page === 'detail' && selected" class="page detail-page">
-          <div class="detail-hero" :class="{ 'without-poster': !selected.vodPic }">
-            <div class="detail-backdrop" :style="selected.vodPic ? { backgroundImage: `url(${selected.vodPic})` } : {}"></div>
+          <div class="detail-hero" :class="{ 'without-poster': !hasUsableImage(selected.vodPic) }">
+            <div class="detail-backdrop" :style="hasUsableImage(selected.vodPic) ? { backgroundImage: `url(${selected.vodPic})` } : {}"></div>
             <div class="detail-overlay"></div>
             <div class="detail-layout">
               <div class="detail-poster">
-                <img v-if="selected.vodPic" :src="selected.vodPic" :alt="selected.vodName" />
-                <div v-else class="poster-fallback"><AppIcon name="film" :size="42" /></div>
+                <img v-if="hasUsableImage(selected.vodPic)" :src="selected.vodPic" :alt="selected.vodName" @error="markImageBroken(selected.vodPic)" />
+                <div v-else class="poster-fallback detail-poster-fallback" :class="posterFallbackClass(selected.vodName)"><AppIcon name="film" :size="42" /><span>{{ selected.vodName.slice(0, 1) }}</span></div>
               </div>
               <div class="detail-copy">
                 <span class="detail-source">{{ selected.siteName || activeSiteName }}</span>
@@ -3133,8 +3286,8 @@ onBeforeUnmount(() => {
             <article v-for="item in favorites" :key="`${item.siteKey}:${item.vodId}`" class="library-card">
               <button class="poster-card" @click="openDetail(item, 'favorites')">
                 <div class="poster-image">
-                  <img v-if="item.vodPic" :src="item.vodPic" :alt="item.vodName" />
-                  <div v-else class="poster-fallback">{{ item.vodName.slice(0, 1) }}</div>
+                  <img v-if="hasUsableImage(item.vodPic)" :src="item.vodPic" :alt="item.vodName" @error="markImageBroken(item.vodPic)" />
+                  <div v-else class="poster-fallback" :class="posterFallbackClass(item.vodName)"><AppIcon name="film" :size="30" /><span>{{ item.vodName.slice(0, 1) }}</span></div>
                   <div class="poster-hover"><AppIcon name="play" :size="16" />查看详情</div>
                 </div>
                 <strong>{{ item.vodName }}</strong>
@@ -3195,7 +3348,7 @@ onBeforeUnmount(() => {
               <button v-for="site in favoriteSourceSites.slice(0, 4)" :key="`favorite:${site.key}`" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
                 <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
                 <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-                <span class="quick-source-state"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
+                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
                 <span class="source-favorite-toggle quick-source-favorite selected" role="button" aria-label="取消收藏来源" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
                 <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
               </button>
@@ -3208,7 +3361,7 @@ onBeforeUnmount(() => {
               <button v-for="site in recentSourceSites.slice(0, 4)" :key="`recent:${site.key}`" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
                 <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
                 <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-                <span class="quick-source-state"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
+                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
                 <span class="source-favorite-toggle quick-source-favorite" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
                 <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
               </button>
@@ -3221,7 +3374,7 @@ onBeforeUnmount(() => {
               <button v-for="site in sourcePageSites" :key="site.key" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
                 <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
                 <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-                <span class="quick-source-state"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
+                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
                 <span class="source-favorite-toggle quick-source-favorite" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
                 <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
               </button>
@@ -3232,21 +3385,32 @@ onBeforeUnmount(() => {
           <section class="settings-card source-config-settings-card content-source-config-card">
             <div class="settings-card-heading"><div class="settings-icon"><AppIcon name="plus" /></div><div><h2>添加内容配置</h2><p>通常只需粘贴配置地址，名称会自动识别。</p></div></div>
             <div class="source-config-overview">
-              <div><span class="source-live-dot"></span><span><small>当前配置</small><strong>{{ activeConfig?.name ?? '未选择配置' }}</strong></span><em>{{ selectableSites.length }} 个可用影视源</em></div>
+              <div><span class="source-live-dot"></span><span><small>当前来源包</small><strong>{{ activeSourcePackageLabel }}</strong></span><em>{{ activeSourcePackageSiteCount }} 个可用影视源</em></div>
               <small v-if="contentSourceMessage" class="replacement-registry-message">{{ contentSourceMessage }}</small>
+            </div>
+            <div v-if="pendingSourceImport" class="pending-source-import-note">
+              <AppIcon name="clock" :size="17" />
+              <span><strong>{{ sourceImportLabel(pendingSourceImport) }} 等待切换</strong><small>当前正在播放，关闭播放器或播放完成后会自动启用新来源包。</small></span>
+              <button class="secondary-button" @click="cancelPendingSourceImport">取消</button>
             </div>
             <div class="source-config-import-form simplified-source-import-form">
               <label class="source-config-url-field"><span>配置地址或本地路径</span><input v-model="configUrl" placeholder="粘贴配置地址后按回车即可导入" @keyup.enter="loadConfig()" /></label>
               <label><span>名称（可选）</span><input v-model="configName" placeholder="留空自动识别" /></label>
               <button class="primary-button" :disabled="!configUrl.trim() || loading" @click="loadConfig()"><AppIcon name="plus" :size="15" />{{ loading ? '正在导入…' : '导入并使用' }}</button>
             </div>
-            <div v-if="configs.length" class="source-config-settings-list">
-              <article v-for="config in configs" :key="config.id ?? config.url" class="source-config-settings-row" :class="{ active: config.enabled }">
+            <div v-if="configs.length || catVodStatus?.state === 'running'" class="source-config-settings-list">
+              <article v-if="catVodStatus?.state === 'running'" class="source-config-settings-row source-runtime-settings-row" :class="{ active: activeSiteIsCatVod }">
+                <span class="source-config-settings-icon"><AppIcon name="sources" :size="17" /></span>
+                <div class="source-config-settings-copy"><strong>{{ catVodSourceLabel }}</strong><span>CatVod 运行环境 · {{ catVodSourceSites.length }} 个可用影视源</span></div>
+                <span class="source-config-settings-state">{{ activeSiteIsCatVod ? '当前来源包' : '运行中' }}</span>
+                <button v-if="!activeSiteIsCatVod && firstCatVodSourceKey" class="secondary-button" @click="selectSource(firstCatVodSourceKey)">使用</button>
+              </article>
+              <article v-for="config in configs" :key="config.id ?? config.url" class="source-config-settings-row" :class="{ active: config.enabled && !activeSiteIsCatVod }">
                 <span class="source-config-settings-icon"><AppIcon name="sources" :size="17" /></span>
                 <div v-if="editingConfigUrl === config.url" class="config-rename-row"><input v-model="editingConfigName" aria-label="配置名称" @keyup.enter="saveConfigName(config)" @keyup.esc="cancelRenameConfig" /><button class="compact-action primary" @click="saveConfigName(config)">保存</button><button class="compact-action" @click="cancelRenameConfig">取消</button></div>
-                <div v-else class="source-config-settings-copy"><strong>{{ config.name }}</strong><span>{{ config.enabled ? '当前使用' : `更新于 ${formatDate(config.updatedAt)}` }}</span></div>
-                <span class="source-config-settings-state">{{ config.enabled ? '当前' : '可切换' }}</span>
-                <button v-if="!config.enabled" class="secondary-button" @click="activateConfig(config)">切换</button>
+                <div v-else class="source-config-settings-copy"><strong>{{ config.name }}</strong><span>{{ config.enabled ? (activeSiteIsCatVod ? '配置已载入' : '当前使用') : `更新于 ${formatDate(config.updatedAt)}` }}</span></div>
+                <span class="source-config-settings-state">{{ config.enabled ? (activeSiteIsCatVod ? '已载入' : '当前') : '可切换' }}</span>
+                <button v-if="!config.enabled || activeSiteIsCatVod" class="secondary-button" @click="activateConfig(config)">{{ config.enabled ? '使用' : '切换' }}</button>
                 <button class="icon-button config-icon-button" title="重命名" @click="beginRenameConfig(config)"><AppIcon name="edit" :size="15" /></button>
                 <button class="icon-button config-icon-button danger" :title="deletingConfigUrl === config.url ? '再次点击确认删除' : '删除配置'" @click="deleteConfig(config)"><AppIcon name="trash" :size="15" /></button>
               </article>
@@ -3299,9 +3463,12 @@ onBeforeUnmount(() => {
             <div class="setting-row"><div><strong>播放失败自动换线路</strong><span>当前线路解析、地址或分段传输失败时，自动尝试同一集的下一条可用线路</span></div><select v-model="autoFallbackLine"><option :value="true">开启</option><option :value="false">关闭</option></select></div>
             <div class="setting-row"><div><strong>线路均失败后自动换来源</strong><span>在其他内容来源中查找同名、同季和相同集数，保持当前播放进度</span></div><select v-model="autoFallbackSource"><option :value="true">开启</option><option :value="false">关闭</option></select></div>
             <div class="setting-row"><div><strong>自动播放下一集</strong><span>当前集自然播放完成后，自动继续同一线路的下一集</span></div><select v-model="autoNextEpisode"><option :value="true">开启</option><option :value="false">关闭</option></select></div>
-            <div class="setting-row"><div><strong>应用内播放器</strong><span>稳定播放器保持当前体验；ArtPlayer 为实验性升级，可随时切回</span></div><select v-model="webPlayerEngine"><option value="legacy">稳定播放器</option><option value="artplayer">ArtPlayer 实验版</option></select></div>
-            <div class="setting-row"><div><strong>播放失败兼容策略</strong><span>自动模式会先等待内置播放器恢复，再切换高兼容播放器；手动模式由你决定是否切换</span></div><select v-model="compatibilityFallbackMode"><option value="automatic">自动切换</option><option value="manual">仅手动切换</option></select></div>
-            <div class="setting-row"><div><strong>默认外部播放器</strong><span>仅在应用内播放器和备用线路均失败后使用；受保护网盘媒体不会向外部进程暴露凭据</span></div><select v-model="externalPlayerPreference"><option value="system">系统播放器</option><option v-if="supportsExternalIina" value="iina">IINA</option><option value="vlc">VLC</option></select></div>
+            <div class="setting-row"><div><strong>播放模式</strong><span>智能播放会自动选择标准播放或高兼容播放；高兼容适合黑屏、只有声音、卡加载或复杂线路</span></div><select v-model="playbackMode"><option value="auto">智能播放（推荐）</option><option value="standard">标准播放</option><option value="compatibility">高兼容播放</option></select></div>
+            <div class="setting-row"><div><strong>原生高兼容内核</strong><span>安装包内运行时完整时自动使用 libmpv 真内嵌；关闭后重启应用将回退 MPV IPC</span></div><select v-model="nativeLibmpvEnabled"><option :value="true">自动启用（推荐）</option><option :value="false">关闭并回退 MPV IPC</option></select></div>
+            <div class="setting-row"><div><strong>标准播放内核</strong><span>仅影响标准播放模式；高兼容线路会自动使用兼容播放内核</span></div><select v-model="webPlayerEngine"><option value="legacy">稳定播放器</option><option value="artplayer">ArtPlayer 实验版</option></select></div>
+            <div class="setting-row"><div><strong>播放失败兼容策略</strong><span>自动模式会先等待标准播放器恢复，再切换高兼容播放；手动模式由你决定是否切换</span></div><select v-model="compatibilityFallbackMode"><option value="automatic">自动切换</option><option value="manual">仅手动切换</option></select></div>
+            <div class="setting-row"><div><strong>高兼容播放记忆</strong><span>已记住 {{ Object.keys(playbackEnginePreferences).length }} 条线路；标准播放失败后会优先使用高兼容播放</span></div><button class="secondary-button" :disabled="Object.keys(playbackEnginePreferences).length === 0" @click="clearPlaybackEnginePreferences">清除记忆</button></div>
+            <div class="setting-row"><div><strong>外部播放器</strong><span>已禁用。视频仅在应用内标准播放器或高兼容内核中播放。</span></div><strong class="setting-enabled">仅应用内播放</strong></div>
             <div class="setting-row"><div><strong>记住播放进度</strong><span>返回影片时自动从上次位置继续</span></div><strong class="setting-enabled">已开启</strong></div>
           </section>
           <section class="settings-card media-presentation-settings-card">
@@ -3382,6 +3549,8 @@ onBeforeUnmount(() => {
               <div><span>Node.js</span><strong>{{ appInfo?.node ?? '读取中…' }}</strong></div>
               <div><span>系统架构</span><strong>{{ appInfo ? `${appInfo.platform} / ${appInfo.arch}` : '读取中…' }}</strong></div>
               <div><span>HLS 播放</span><strong>{{ nativeHlsSupported ? '系统原生内置播放' : 'HLS.js / MSE 内置播放' }}</strong></div>
+              <div><span>高兼容后端</span><strong>{{ appInfo?.playerBackend === 'native-libmpv' ? 'libmpv 原生内嵌' : appInfo?.playerBackend === 'unavailable' ? '暂不可用' : 'MPV JSON IPC（仅诊断）' }}</strong></div>
+              <div><span>libmpv 原生内嵌</span><strong>{{ appInfo?.nativeLibmpv?.available ? '已启用' : (appInfo?.nativeLibmpv?.reason || '未启用') }}</strong></div>
             </div>
           </section>
           <section class="settings-card">
@@ -3440,5 +3609,11 @@ onBeforeUnmount(() => {
       @fallback="fallbackEmbeddedPlayback"
       @engine-fallback="handleWebPlayerEngineFallback"
     />
+    <div v-if="playing && pendingSourceImport" class="pending-source-switch-banner">
+      <AppIcon name="sources" :size="18" />
+      <span><strong>{{ sourceImportLabel(pendingSourceImport) }} 已准备切换</strong><small>当前视频继续播放；关闭播放器或本集播放完成后自动切换。</small></span>
+      <button class="primary-button" :disabled="loading" @click="stopPlaybackAndApplyPendingSource">立即切换</button>
+      <button class="secondary-button" :disabled="loading" @click="cancelPendingSourceImport">取消</button>
+    </div>
   </div>
 </template>

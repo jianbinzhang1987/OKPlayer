@@ -15,6 +15,8 @@ class MockPlayer {
   stop(){ this.commands.push("stop"); }
   seek(value:number){ this.commands.push(value); }
   setSpeed(value:number){ this.commands.push({ speed: value }); }
+  setVolume(value:number){ this.commands.push({ volume: value }); }
+  setMuted(value:boolean){ this.commands.push({ muted: value }); }
 }
 
 test("player service opens media through mpv abstraction", async () => {
@@ -28,6 +30,12 @@ test("player service opens media through mpv abstraction", async () => {
   mock.listeners.get("time-pos")?.(42);
   mock.listeners.get("duration")?.(100);
   await service.setSpeed(1.5);
-  assert.deepEqual(service.getState(), { position: 42, duration: 100, paused: false, stopped: false, speed: 1.5 });
+  await service.setVolume(65);
+  await service.setMuted(true);
+  assert.deepEqual(service.getState(), { position: 42, duration: 100, paused: false, stopped: false, speed: 1.5, volume: 65, muted: true });
+  mock.listeners.get("volume")?.(72);
+  mock.listeners.get("mute")?.(false);
+  assert.equal(service.getState().volume, 72);
+  assert.equal(service.getState().muted, false);
   assert.equal(states.length >= 3, true);
 });

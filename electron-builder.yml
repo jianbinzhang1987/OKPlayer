@@ -2,7 +2,13 @@ appId: com.fongmi.desktop
 productName: FongMi Desktop
 copyright: Copyright © 2026 FongMi Desktop
 asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/*.dll"
+  - "**/*.dylib"
+  - "**/*.so*"
 electronVersion: 43.2.0
+afterPack: scripts/after-pack-native-runtime.mjs
 directories:
   output: release
   buildResources: build
@@ -15,7 +21,22 @@ extraResources:
     to: mpv
     filter:
       - "**/*"
+  - from: resources/libmpv
+    to: libmpv
+    filter:
+      - "**/*"
 mac:
+  extraResources:
+    - from: resources/native/libmpv-player/darwin-${arch}
+      to: native/libmpv-player/darwin-${arch}
+      filter:
+        - "**/*.node"
+    - from: build/native-runtime/libmpv/darwin-${arch}
+      to: libmpv/darwin-${arch}
+      filter:
+        - "**/*.dylib"
+        - "runtime-manifest.json"
+        - "NATIVE_RUNTIME_NOTICES.md"
   icon: build/icon.icns
   category: public.app-category.entertainment
   darkModeSupport: true
@@ -49,6 +70,20 @@ dmg:
       type: link
       path: /Applications
 win:
+  signExts:
+    - ".dll"
+    - ".node"
+  extraResources:
+    - from: resources/native/libmpv-player/win32-${arch}
+      to: native/libmpv-player/win32-${arch}
+      filter:
+        - "**/*.node"
+    - from: build/native-runtime/libmpv/win32-${arch}
+      to: libmpv/win32-${arch}
+      filter:
+        - "**/*.dll"
+        - "runtime-manifest.json"
+        - "NATIVE_RUNTIME_NOTICES.md"
   icon: build/icon.png
   executableName: FongMi Desktop
   target:
@@ -66,6 +101,17 @@ nsis:
   createStartMenuShortcut: true
   deleteAppDataOnUninstall: false
 linux:
+  extraResources:
+    - from: resources/native/libmpv-player/linux-${arch}
+      to: native/libmpv-player/linux-${arch}
+      filter:
+        - "**/*.node"
+    - from: build/native-runtime/libmpv/linux-${arch}
+      to: libmpv/linux-${arch}
+      filter:
+        - "**/*.so*"
+        - "runtime-manifest.json"
+        - "NATIVE_RUNTIME_NOTICES.md"
   icon: build/icon.png
   executableName: fongmi-desktop
   maintainer: jianbinzhang@126.com

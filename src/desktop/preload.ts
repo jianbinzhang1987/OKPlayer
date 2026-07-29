@@ -64,7 +64,12 @@ contextBridge.exposeInMainWorld("tvApi", {
   pause: () => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_PAUSE),
   seek: (seconds: number) => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_SEEK, seconds),
   setSpeed: (speed: number) => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_SPEED, speed),
+  setVolume: (volume: number) => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_VOLUME, volume),
+  setMuted: (muted: boolean) => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_MUTE, muted),
   stop: () => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_STOP),
+  attachNativePlayerView: (rect: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_NATIVE_ATTACH, rect),
+  resizeNativePlayerView: (rect: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_NATIVE_RESIZE, rect),
+  detachNativePlayerView: () => ipcRenderer.invoke(EXTRA_CHANNELS.PLAYER_NATIVE_DETACH),
   onPlayerState: (callback: (state: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: unknown) => callback(state);
     ipcRenderer.on(EXTRA_CHANNELS.PLAYER_STATE, listener);

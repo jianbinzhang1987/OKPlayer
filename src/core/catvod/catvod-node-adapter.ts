@@ -27,7 +27,7 @@ export class CatVodNodeAdapter implements SourceAdapter {
     this.capabilities = {
       home: true,
       category: true,
-      search: site.searchable !== 0 && site.contentType !== "tool" && site.contentType !== "discovery",
+      search: site.searchable !== 0 && !["tool", "discovery", "pan"].includes(site.contentType ?? ""),
       detail: site.contentType !== "tool" && site.contentType !== "discovery",
       player: site.contentType !== "tool" && site.contentType !== "discovery",
       proxy: true,

@@ -149,10 +149,30 @@ test("protected pan media reports expired authentication without degrading the s
   assert.deepEqual(failures, []);
 });
 
-test("desktop playback routes unsupported formats to compatibility mode", async () => {
+test("desktop playback routes unsupported formats and explicit compatibility mode to compatibility mode", async () => {
   const fixture = createServices("https://cdn.example.com/demo.flv");
   const prepared = await fixture.service.prepare({ siteKey: "s", flag: "line", episodeUrl: "episode-1" });
   assert.equal(prepared.engine, "mpv");
+
+  const forced = createServices("https://cdn.example.com/demo.mp4");
+  const forcedPrepared = await forced.service.prepare({
+    siteKey: "s",
+    flag: "line",
+    episodeUrl: "episode-1",
+    playbackMode: "compatibility",
+  });
+  assert.equal(forcedPrepared.engine, "mpv");
+});
+
+test("desktop playback keeps standard mode on web-compatible media", async () => {
+  const fixture = createServices("https://cdn.example.com/demo.mp4");
+  const prepared = await fixture.service.prepare({
+    siteKey: "s",
+    flag: "line",
+    episodeUrl: "episode-1",
+    playbackMode: "standard",
+  });
+  assert.equal(prepared.engine, "web");
 });
 
 test("desktop playback rejects definitively dead direct media before creating a session", async () => {

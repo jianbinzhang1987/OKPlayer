@@ -22,6 +22,6 @@ test("embedded player uses a configurable delayed compatibility fallback", async
   assert.ok(policy.includes("AUTOMATIC_COMPATIBILITY_FALLBACK_DELAY_MS = 4_000"));
   assert.ok(app.includes("compatibilityFallbackMode"));
   assert.ok(app.includes("播放失败兼容策略"));
-  assert.ok(app.includes("已切换到高兼容播放器，并从当前进度继续播放"));
+  assert.ok(app.includes("标准播放模式无法正常加载，已切换到高兼容播放模式"));
   assert.doesNotMatch(app, /该播放源已记录为异常，后续搜索和推荐将自动隐藏/);
 });

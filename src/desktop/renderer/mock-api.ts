@@ -301,7 +301,12 @@ export function createMockTvApi() {
     pause: async () => undefined,
     seek: async () => undefined,
     setSpeed: async () => undefined,
+    setVolume: async () => undefined,
+    setMuted: async () => undefined,
     stop: async () => undefined,
+    attachNativePlayerView: async () => ({ ok: false, backend: "mpv-ipc" }),
+    resizeNativePlayerView: async () => ({ ok: false, backend: "mpv-ipc" }),
+    detachNativePlayerView: async () => ({ ok: true, backend: "mpv-ipc" }),
     onPlayerState: () => () => undefined,
     preparePlayback: async (input: any) => {
       const episodeUrl = String(input?.episodeUrl ?? "");
@@ -321,7 +326,7 @@ export function createMockTvApi() {
       };
     },
     closePlayback: async () => ({ closed: true }),
-    fallbackPlayback: async () => ({ status: "started" }),
+    fallbackPlayback: async () => ({ status: "started", backend: "mpv-ipc" }),
     cancelPlaybackPreparation: async () => undefined,
     sniffPlay: async () => ({ url: "mock://media", headers: {}, resolvedBy: "browser-sniffer" }),
     cancelSniff: async () => undefined,

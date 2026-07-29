@@ -33,7 +33,7 @@ export function parseCatVodConfig(payload: unknown): ParsedCatVodConfig {
 
     const name = text(item.name) || rawKey;
     const contentType = classifyCatVodSite(rawKey, name);
-    const hiddenByDefault = !["vod", "discovery"].includes(contentType);
+    const hiddenByDefault = !["vod", "discovery", "pan"].includes(contentType);
     sites.push({
       key,
       name,
@@ -42,8 +42,8 @@ export function parseCatVodConfig(payload: unknown): ParsedCatVodConfig {
       runtimeGroup: CATVOD_RUNTIME_GROUP,
       contentType,
       originKey: rawKey,
-      searchable: number(item.searchable, 1),
-      quickSearch: number(item.quickSearch, 1),
+      searchable: contentType === "pan" ? 0 : number(item.searchable, 1),
+      quickSearch: contentType === "pan" ? 0 : number(item.quickSearch, 1),
       filterable: number(item.filterable, 1),
       indexs: number(item.indexs, 0),
       changeable: optionalNumber(item.changeable),
@@ -75,7 +75,7 @@ export function classifyCatVodSite(key: string, name: string): CatVodContentType
 }
 
 export function isCatVodSiteVisibleByDefault(site: SiteConfig): boolean {
-  return site.hide !== 1 && (site.contentType === "vod" || site.contentType === "discovery");
+  return site.hide !== 1 && ["vod", "discovery", "pan"].includes(site.contentType ?? "vod");
 }
 
 function toInternalApi(value: string): string {

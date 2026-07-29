@@ -15,9 +15,19 @@ concurrency:
 
 jobs:
   build-macos:
-    name: Build macOS DMG
-    runs-on: macos-14
-    timeout-minutes: 45
+    name: Build macOS ${{ matrix.arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x64
+            artifact: release-macos-x64
+          - runner: macos-15
+            arch: arm64
+            artifact: release-macos-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       npm_config_audit: "false"
@@ -33,6 +43,36 @@ jobs:
           node-version: "22.13.0"
           cache: npm
 
+      - name: Install native media runtime
+        shell: bash
+        run: brew install mpv
+
+      - name: Configure native runtime metadata
+        shell: bash
+        run: |
+          MPV_PREFIX="$(brew --prefix mpv)"
+          LIBMPV_SOURCE="$(find "$MPV_PREFIX/lib" -maxdepth 1 \( -type f -o -type l \) -name 'libmpv.2.dylib' -print -quit)"
+          if [ -z "$LIBMPV_SOURCE" ]; then
+            LIBMPV_SOURCE="$(find "$MPV_PREFIX/lib" -maxdepth 1 \( -type f -o -type l \) -name 'libmpv*.dylib' -print -quit)"
+          fi
+          test -n "$LIBMPV_SOURCE"
+          test -f "$LIBMPV_SOURCE"
+
+          MPV_INFO="$(brew info --json=v2 mpv)"
+          FFMPEG_INFO="$(brew info --json=v2 ffmpeg)"
+          json_field() {
+            node -e 'const value=JSON.parse(process.argv[1]).formulae[0]; const path=process.argv[2].split("."); let current=value; for (const key of path) current=current?.[key]; if (current === undefined || current === null || current === "") process.exit(2); process.stdout.write(String(current));' "$1" "$2"
+          }
+
+          echo "FONGMI_NATIVE_ARCH=${{ matrix.arch }}" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_SOURCE=$LIBMPV_SOURCE" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_VERSION=$(json_field "$MPV_INFO" versions.stable)" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_LICENSE=$(json_field "$MPV_INFO" license)" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_SOURCE_URL=$(json_field "$MPV_INFO" urls.stable.url)" >> "$GITHUB_ENV"
+          echo "FONGMI_FFMPEG_VERSION=$(json_field "$FFMPEG_INFO" versions.stable)" >> "$GITHUB_ENV"
+          echo "FONGMI_FFMPEG_LICENSE=$(json_field "$FFMPEG_INFO" license)" >> "$GITHUB_ENV"
+          echo "FONGMI_FFMPEG_SOURCE_URL=$(json_field "$FFMPEG_INFO" urls.stable.url)" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 
@@ -42,13 +82,13 @@ jobs:
       - name: Unit and structure tests
         run: npm test
 
-      - name: Build macOS x64 and arm64 DMG
-        run: npm run package:mac:all
+      - name: Build native-libmpv DMG
+        run: npm run package:native
 
-      - name: Upload macOS packages
+      - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
-          name: release-macos
+          name: ${{ matrix.artifact }}
           path: release/*.dmg
           if-no-files-found: error
           retention-days: 14
@@ -160,11 +200,17 @@ jobs:
           body: |
             OKPlayer 跨平台桌面版本。
 
-            本版本重点修复浅色主题可读性、Windows CatVod 服务启动和设置持久化问题，并优化搜索与播放源界面。
+            本版本重点更新：
+            - macOS Intel 与 Apple Silicon 安装包内置 native-libmpv 高兼容播放运行时，标准播放和兼容播放均保持在应用内；
+            - 修复移动端 User-Agent 含逗号时导致 libmpv 请求头被错误拆分、媒体返回 HTTP 400 的问题；
+            - 修正来源质量误报，自动抽样只用于推荐和排序，Android Dex/JAR 来源按平台能力忽略；
+            - 区分 Android 运行时和网盘业务能力，支持通过桌面 CatVod Node 登录并浏览夸克、百度等网盘；
+            - 修复浅色主题可读性、来源切换后首页不刷新以及图片加载失败等体验问题；
+            - 外部播放器入口和自动兜底已关闭，播放失败时改为应用内换线路、换来源或重试。
 
             包含以下桌面安装包：
-            - macOS Intel x64 DMG
-            - macOS Apple Silicon arm64 DMG
+            - macOS Intel x64 DMG（内置 native-libmpv）
+            - macOS Apple Silicon arm64 DMG（内置 native-libmpv）
             - Windows x64 安装版与便携版
             - Linux x64 AppImage 与 DEB
 

@@ -11,10 +11,14 @@ import {
 } from "./playback-error.ts";
 import {
   PlaybackSessionStore,
-  isWebPlaybackCandidate,
   type PlaybackMediaFormat,
   type PlaybackResourceKind,
 } from "./media-protocol/playback-session-store.ts";
+import {
+  normalizePlaybackMode,
+  selectPlaybackEngine as choosePlaybackEngine,
+  type PlaybackMode,
+} from "./player-engine-selector.ts";
 
 export interface PreparePlaybackInput {
   siteKey: string;
@@ -23,6 +27,7 @@ export interface PreparePlaybackInput {
   vodId?: string;
   vodName?: string;
   episodeName?: string;
+  playbackMode?: PlaybackMode;
 }
 
 export interface PreparedPlayback {
@@ -56,6 +61,7 @@ const PREPARATION_TIMEOUT_MS = 15_000;
 interface PlaybackFallbackPlayer {
   open(url: string, headers?: Record<string, string>): Promise<unknown>;
   stop(): Promise<unknown>;
+  getBackend?(): string;
 }
 
 export class DesktopPlaybackService {
@@ -144,11 +150,11 @@ export class DesktopPlaybackService {
     }
   }
 
-  async fallback(sessionId: string): Promise<{ status: "started" }> {
+  async fallback(sessionId: string): Promise<{ status: "started"; backend: string }> {
     const session = this.sessions.get(sessionId);
     try {
       await this.fallbackPlayer.open(session.sourceUrl, session.headers);
-      return { status: "started" };
+      return { status: "started", backend: this.fallbackPlayer.getBackend?.() ?? "mpv-ipc" };
     } catch (error) {
       throw new PlaybackFailure(
         "COMPAT_ENGINE_FAILED",
@@ -300,14 +306,17 @@ class DirectMediaUnavailableError extends PlaybackFailure {
 export function selectPlaybackEngine(
   format: PlaybackMediaFormat,
   sourceUrl: string,
-  _headers: Record<string, string>,
-  _input: Pick<PreparePlaybackInput, "siteKey" | "flag">,
+  headers: Record<string, string>,
+  input: Pick<PreparePlaybackInput, "siteKey" | "flag" | "playbackMode">,
 ): "web" | "mpv" {
-  // Protected headers stay inside the main-process playback session and are
-  // forwarded by fongmi-media. Web-compatible MP4/HLS therefore remain in the
-  // application window first; codec or browser failures still trigger the
-  // existing automatic compatibility fallback.
-  return isWebPlaybackCandidate(format, sourceUrl) ? "web" : "mpv";
+  return choosePlaybackEngine({
+    format,
+    sourceUrl,
+    headers,
+    playbackMode: normalizePlaybackMode(input.playbackMode),
+    siteKey: input.siteKey,
+    flag: input.flag,
+  });
 }
 
 function isLikelyDirectMediaUrl(value: string): boolean {

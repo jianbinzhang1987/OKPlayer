@@ -98,7 +98,7 @@ export function getSiteCapability(site: SiteConfig): SourceCapability {
       supported: true,
       runtime: "catvod-node",
       capabilities: standard({
-        search: site.searchable !== 0 && site.contentType !== "tool" && site.contentType !== "discovery",
+        search: site.searchable !== 0 && !["tool", "discovery", "pan"].includes(site.contentType ?? ""),
         detail: site.contentType !== "tool" && site.contentType !== "discovery",
         player: site.contentType !== "tool" && site.contentType !== "discovery",
         proxy: true,

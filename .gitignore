@@ -5,6 +5,24 @@ node_modules/
 dist/
 release/
 artifacts/
+build/native-runtime/libmpv/*
+!build/native-runtime/libmpv/README.md
+!build/native-runtime/libmpv/darwin-x64/
+!build/native-runtime/libmpv/darwin-arm64/
+!build/native-runtime/libmpv/win32-x64/
+!build/native-runtime/libmpv/linux-x64/
+build/native-runtime/libmpv/darwin-x64/*
+build/native-runtime/libmpv/darwin-arm64/*
+build/native-runtime/libmpv/win32-x64/*
+build/native-runtime/libmpv/linux-x64/*
+!build/native-runtime/libmpv/darwin-x64/.gitkeep
+!build/native-runtime/libmpv/darwin-arm64/.gitkeep
+!build/native-runtime/libmpv/win32-x64/.gitkeep
+!build/native-runtime/libmpv/linux-x64/.gitkeep
+
+# Native addon build outputs
+native/libmpv-player/build/
+resources/native/**/*.node
 
 # Local runtime data and temporary files
 .tmp-*

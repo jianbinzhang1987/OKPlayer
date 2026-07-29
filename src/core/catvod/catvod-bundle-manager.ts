@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { prepareHttpRequest, type PreparedHttpRequest } from "../http-auth.ts";
 import type {
   CatVodBundleManifest,
   CatVodBundleVersion,
@@ -17,6 +18,10 @@ export interface CatVodBundleManagerOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxScriptBytes?: number;
+}
+
+interface AuthenticatedCatVodRemoteBundle extends CatVodRemoteBundle {
+  authorization?: string;
 }
 
 export class CatVodBundleManager {
@@ -49,30 +54,36 @@ export class CatVodBundleManager {
     ]);
   }
 
-  async inspectRemote(sourceMd5Url: string): Promise<CatVodRemoteBundle> {
-    const md5Url = validateRemoteUrl(sourceMd5Url);
-    const response = await this.fetchImpl(md5Url, {
+  async inspectRemote(sourceMd5Url: string): Promise<AuthenticatedCatVodRemoteBundle> {
+    const request = prepareCatVodHttpRequest(sourceMd5Url, {
       redirect: "follow",
       signal: AbortSignal.timeout(this.timeoutMs),
       headers: { accept: "text/plain,application/octet-stream;q=0.9,*/*;q=0.1" },
     });
+    const response = await this.fetchImpl(request.url, request.init);
     if (!response.ok) throw new Error(`CatVod MD5 请求失败：HTTP ${response.status}`);
     const md5 = (await response.text()).trim().toLowerCase();
     if (!MD5_PATTERN.test(md5)) throw new Error("CatVod MD5 响应不是有效的 32 位十六进制值");
 
-    const scriptUrl = new URL(md5Url);
+    const scriptUrl = new URL(request.url);
     if (!scriptUrl.pathname.endsWith(".md5")) throw new Error("CatVod MD5 地址必须以 .md5 结尾");
     scriptUrl.pathname = scriptUrl.pathname.slice(0, -4);
-    return { sourceMd5Url: md5Url, scriptUrl: scriptUrl.toString(), md5 };
+    const authorization = new Headers(request.init.headers).get("authorization") ?? undefined;
+    return {
+      sourceMd5Url: request.url,
+      scriptUrl: scriptUrl.toString(),
+      md5,
+      ...(authorization ? { authorization } : {}),
+    };
   }
 
   async ensureCurrent(sourceMd5Url: string): Promise<CatVodBundleVersion> {
     await this.initialize();
-    const normalizedSource = validateRemoteUrl(sourceMd5Url);
+    const normalizedSource = normalizeCatVodHttpUrl(sourceMd5Url);
     const manifest = await this.readManifest(normalizedSource);
     if (manifest.sourceMd5Url === normalizedSource && manifest.current && await this.versionValid(manifest.current.md5)) return manifest.current;
 
-    const remote = await this.inspectRemote(normalizedSource);
+    const remote = await this.inspectRemote(sourceMd5Url);
     const version = await this.downloadVersion(remote);
     await this.writeManifest({
       sourceMd5Url: remote.sourceMd5Url,
@@ -84,9 +95,9 @@ export class CatVodBundleManager {
 
   async checkForUpdate(sourceMd5Url: string): Promise<CatVodUpdateResult> {
     await this.initialize();
-    const normalizedSource = validateRemoteUrl(sourceMd5Url);
+    const normalizedSource = normalizeCatVodHttpUrl(sourceMd5Url);
     const manifest = await this.readManifest(normalizedSource);
-    const remote = await this.inspectRemote(normalizedSource);
+    const remote = await this.inspectRemote(sourceMd5Url);
     if (manifest.sourceMd5Url === normalizedSource && manifest.current?.md5 === remote.md5 && await this.versionValid(remote.md5)) {
       return {
         state: "current",
@@ -158,7 +169,7 @@ export class CatVodBundleManager {
   }
 
   async currentVersion(sourceMd5Url: string): Promise<CatVodBundleVersion | undefined> {
-    const normalizedSource = validateRemoteUrl(sourceMd5Url);
+    const normalizedSource = normalizeCatVodHttpUrl(sourceMd5Url);
     const manifest = await this.readManifest(normalizedSource);
     return manifest.sourceMd5Url === normalizedSource && manifest.current && await this.versionValid(manifest.current.md5)
       ? manifest.current
@@ -193,7 +204,7 @@ export class CatVodBundleManager {
     return path.join(this.versionsDir, md5, "index.js");
   }
 
-  private async downloadVersion(remote: CatVodRemoteBundle): Promise<CatVodBundleVersion> {
+  private async downloadVersion(remote: AuthenticatedCatVodRemoteBundle): Promise<CatVodBundleVersion> {
     if (await this.versionValid(remote.md5)) {
       const script = await readFile(this.scriptPath(remote.md5));
       return {
@@ -208,7 +219,10 @@ export class CatVodBundleManager {
     const response = await this.fetchImpl(remote.scriptUrl, {
       redirect: "follow",
       signal: AbortSignal.timeout(this.timeoutMs),
-      headers: { accept: "text/javascript,application/javascript,application/octet-stream;q=0.9,*/*;q=0.1" },
+      headers: {
+        accept: "text/javascript,application/javascript,application/octet-stream;q=0.9,*/*;q=0.1",
+        ...(remote.authorization ? { authorization: remote.authorization } : {}),
+      },
     });
     if (!response.ok) throw new Error(`CatVod 脚本下载失败：HTTP ${response.status}`);
     const declaredLength = Number(response.headers.get("content-length") ?? 0);
@@ -257,14 +271,16 @@ export class CatVodBundleManager {
   }
 }
 
-function validateRemoteUrl(value: string): string {
+function prepareCatVodHttpRequest(value: string, init: RequestInit = {}): PreparedHttpRequest {
   const trimmed = value.trim();
   if (!trimmed) throw new Error("CatVod MD5 地址不能为空");
   const url = new URL(trimmed);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("CatVod MD5 地址仅支持 HTTP/HTTPS");
-  url.username = "";
-  url.password = "";
-  return url.toString();
+  return prepareHttpRequest(url, init);
+}
+
+function normalizeCatVodHttpUrl(value: string): string {
+  return prepareCatVodHttpRequest(value).url;
 }
 
 function digest(algorithm: "md5" | "sha256", value: Buffer): string {

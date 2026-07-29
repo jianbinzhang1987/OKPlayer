@@ -2,9 +2,19 @@ name: Desktop Cross-Platform Build
 
 on:
   workflow_dispatch:
+    inputs:
+      windows_libmpv_zip_url:
+        description: "Optional HTTPS URL of a pinned Windows libmpv ZIP"
+        required: false
+        type: string
+      windows_libmpv_zip_sha256:
+        description: "Required SHA-256 when windows_libmpv_zip_url is provided"
+        required: false
+        type: string
   push:
     paths:
       - "src/**"
+      - "native/**"
       - "scripts/**"
       - "resources/**"
       - "build/**"
@@ -17,6 +27,7 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "native/**"
       - "scripts/**"
       - "resources/**"
       - "build/**"
@@ -69,8 +80,80 @@ jobs:
           node-version: "22.13.0"
           cache: npm
 
+      - name: Install Linux native build and runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libgl1-mesa-dev libmpv-dev mpv ffmpeg patchelf xvfb xauth
+
+      - name: Resolve Linux libmpv runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          LIBMPV_PATH="$(ldconfig -p | awk '/libmpv\.so/{print $NF; exit}')"
+          if [ -z "$LIBMPV_PATH" ]; then
+            LIBMPV_PATH="$(find /usr/lib /lib -name 'libmpv.so*' -type f -print -quit)"
+          fi
+          test -n "$LIBMPV_PATH"
+          echo "FONGMI_LIBMPV_SOURCE=$LIBMPV_PATH" >> "$GITHUB_ENV"
+          echo "FONGMI_NATIVE_ARCH=x64" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Configure Windows native audit tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          Add-Content -Path $env:GITHUB_PATH -Value $dumpbin.DirectoryName
+
+      - name: Download verified Windows libmpv runtime
+        if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && inputs.windows_libmpv_zip_url != ''
+        shell: pwsh
+        run: |
+          if (-not "${{ inputs.windows_libmpv_zip_sha256 }}") { throw "windows_libmpv_zip_sha256 is required" }
+          $archive = Join-Path $env:RUNNER_TEMP "fongmi-libmpv.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "fongmi-libmpv"
+          Invoke-WebRequest -Uri "${{ inputs.windows_libmpv_zip_url }}" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $expected = "${{ inputs.windows_libmpv_zip_sha256 }}".Trim().ToLowerInvariant()
+          if ($actual -ne $expected) { throw "libmpv SHA-256 mismatch: $actual" }
+          Expand-Archive -Path $archive -DestinationPath $extract -Force
+          $library = Get-ChildItem $extract -Recurse -File | Where-Object { $_.Name -in @("mpv-2.dll", "libmpv-2.dll", "libmpv.dll") } | Select-Object -First 1
+          if (-not $library) { throw "No supported libmpv DLL found in verified ZIP" }
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_SOURCE=$($library.FullName)"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_DEPENDENCY_DIRS=$extract"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_NATIVE_ARCH=x64"
+
+      - name: Build native libmpv addon
+        shell: bash
+        env:
+          FONGMI_BUILD_NATIVE_LIBMPV: "1"
+          FONGMI_NATIVE_ARCH: "x64"
+        run: npm run build:native:libmpv
+
+      - name: Cross-compile macOS arm64 native addon
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          FONGMI_BUILD_NATIVE_LIBMPV: "1"
+          FONGMI_NATIVE_ARCH: "arm64"
+        run: |
+          npm run build:native:libmpv
+          test "$(lipo -archs resources/native/libmpv-player/darwin-arm64/fongmi_libmpv_player.node)" = "arm64"
+
+      - name: Restore macOS x64 native addon for current package
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          FONGMI_BUILD_NATIVE_LIBMPV: "1"
+          FONGMI_NATIVE_ARCH: "x64"
+        run: npm run build:native:libmpv
 
       - name: Type check
         run: npm run typecheck
@@ -78,13 +161,37 @@ jobs:
       - name: Unit and structure tests
         run: npm test
 
-      - name: Build unpacked application
+      - name: Build standard unpacked application
+        if: runner.os == 'macOS' || (runner.os == 'Windows' && (github.event_name != 'workflow_dispatch' || inputs.windows_libmpv_zip_url == ''))
         run: npm run ${{ matrix.package_script }}
+
+      - name: Build native-libmpv unpacked application
+        if: runner.os == 'Linux' || (runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && inputs.windows_libmpv_zip_url != '')
+        run: npm run package:native:dir
+
+      - name: Install Playwright Electron driver
+        if: runner.os == 'Linux' || (runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && inputs.windows_libmpv_zip_url != '')
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.54.2
+
+      - name: Install Windows ffmpeg test fixture dependency
+        if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && inputs.windows_libmpv_zip_url != ''
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Linux packaged native-libmpv E2E
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run e2e:native:packaged
+
+      - name: Windows packaged native-libmpv E2E
+        if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && inputs.windows_libmpv_zip_url != ''
+        run: npm run e2e:native:packaged
 
       - name: Upload unpacked application
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            artifacts/packaged-native-libmpv-e2e
           if-no-files-found: error
           retention-days: 7

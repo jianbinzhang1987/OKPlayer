@@ -1,10 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { validateNativeRuntimeLicensing } from "./lib/native-runtime-license.mjs";
 
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
@@ -16,11 +18,18 @@ const buildIcon = path.join(root, "build", "icon.icns");
 const artifactDirectory = path.join(root, "artifacts", "release-audit");
 const asarBinary = path.join(root, "node_modules", ".bin", "asar");
 const requireSigned = process.env.REQUIRE_SIGNED === "1";
+const requireNativeLibmpv = process.env.REQUIRE_NATIVE_LIBMPV === "1";
 
-const targets = [
+const allTargets = [
   { arch: "x64", appDirectory: "mac", expectedMachO: "x86_64" },
   { arch: "arm64", appDirectory: "mac-arm64", expectedMachO: "arm64" },
 ];
+const requestedArchitectures = String(process.env.RELEASE_ARCHS || "x64,arm64")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const targets = allTargets.filter((target) => requestedArchitectures.includes(target.arch));
+if (targets.length === 0) throw new Error(`没有可验证的发布架构：${requestedArchitectures.join(",")}`);
 
 await mkdir(artifactDirectory, { recursive: true });
 const buildIconHash = await sha256(buildIcon);
@@ -79,6 +88,7 @@ for (const target of targets) {
   if (!/script-src 'self'/.test(rendererHtml)) throw new Error(`${target.arch} 应用包 CSP 未限制为本地脚本`);
 
   const signing = assessSigning(appPath);
+  const nativeRuntime = await assessNativeRuntime(appPath, target.expectedMachO, requireNativeLibmpv);
   const mounted = await inspectDmg(dmgPath, target.expectedMachO);
 
   results.push({
@@ -100,6 +110,7 @@ for (const target of targets) {
     localScriptsOnly: true,
     mounted,
     signing,
+    nativeRuntime,
   });
 }
 
@@ -109,14 +120,17 @@ if (results.length !== targets.length) {
 
 const signedAll = results.every((item) => item.signing.signed);
 const gatekeeperAcceptedAll = results.every((item) => item.signing.gatekeeperAccepted);
-const passed = !requireSigned || (signedAll && gatekeeperAcceptedAll);
+const nativeRuntimeReadyAll = results.every((item) => item.nativeRuntime.ready || !requireNativeLibmpv);
+const passed = (!requireSigned || (signedAll && gatekeeperAcceptedAll)) && nativeRuntimeReadyAll;
 const report = {
   verifiedAt: new Date().toISOString(),
   version,
   requireSigned,
+  requireNativeLibmpv,
   signedAll,
   gatekeeperAcceptedAll,
   unsigned: !signedAll,
+  nativeRuntimeReadyAll,
   targets: results,
   passed,
 };
@@ -152,6 +166,87 @@ function assessSigning(appPath) {
   };
 }
 
+async function assessNativeRuntime(appPath, expectedMachO, required) {
+  const resourcesDirectory = path.join(appPath, "Contents", "Resources");
+  const manifestPath = path.join(resourcesDirectory, "native-runtime-manifest.json");
+  const manifest = await readFile(manifestPath, "utf8").then(JSON.parse, () => undefined);
+  if (!manifest) {
+    if (required) throw new Error(`缺少 native runtime manifest：${manifestPath}`);
+    return { present: false, ready: false, required, files: [] };
+  }
+
+  const licensingValidation = validateNativeRuntimeLicensing(manifest.licensing);
+  if (required && !licensingValidation.valid && process.env.FONGMI_ALLOW_UNVERIFIED_LICENSES !== "1") {
+    throw new Error(`正式发布的 native runtime 许可证元数据不完整：\n${licensingValidation.issues.join("\n")}`);
+  }
+
+  const entries = Array.isArray(manifest.files) ? manifest.files : [];
+  const files = [];
+  for (const entry of entries) {
+    const relativePath = String(entry.path ?? "");
+    const filePath = path.join(resourcesDirectory, relativePath);
+    const info = await stat(filePath).catch(() => undefined);
+    if (!info?.isFile()) throw new Error(`native runtime 文件不存在：${relativePath}`);
+    const architecture = execFileSync("file", [filePath], { encoding: "utf8" }).trim();
+    const architectureValid = architecture.includes(expectedMachO);
+    if (!architectureValid) throw new Error(`native runtime 架构不正确：${relativePath} ${architecture}`);
+
+    const dependencyAudit = relativePath.endsWith(".dylib") ? auditPackagedDarwinLibrary(filePath) : { unresolved: [] };
+    if (dependencyAudit.unresolved.length > 0) {
+      throw new Error(`native runtime 包含开发机或未闭合依赖：${relativePath}\n${dependencyAudit.unresolved.join("\n")}`);
+    }
+
+    const signatureVerify = run("codesign", ["--verify", "--strict", "--verbose=2", filePath]);
+    const signatureDetails = run("codesign", ["-dv", "--verbose=4", filePath]);
+    const developerIdSigned = /Authority=Developer ID Application:/m.test(signatureDetails.output);
+    if (requireSigned && !developerIdSigned) {
+      throw new Error(`正式发布的 native runtime 未使用 Developer ID 签名：${relativePath}`);
+    }
+    files.push({
+      path: relativePath,
+      bytes: info.size,
+      architecture,
+      architectureValid,
+      signed: signatureVerify.ok,
+      developerIdSigned,
+      teamIdentifier: extract(signatureDetails.output, /^TeamIdentifier=(.+)$/m),
+      dependencyAudit,
+    });
+  }
+
+  const addonPresent = files.some((item) => item.path.endsWith("fongmi_libmpv_player.node"));
+  const libmpvPresent = files.some((item) => /libmpv.*\.(?:dylib|dll)|libmpv\.so/i.test(item.path));
+  const manifestClosed = manifest.dependencyAudit?.unresolved?.length === 0;
+  const ready = addonPresent && libmpvPresent && manifestClosed && files.every((item) => item.architectureValid && item.signed);
+  if (required && !ready) throw new Error("native libmpv 运行时未满足正式发布要求");
+  return {
+    present: true,
+    ready,
+    required,
+    addonPresent,
+    libmpvPresent,
+    manifestClosed,
+    signing: manifest.signing,
+    licensing: manifest.licensing,
+    licensingValidation,
+    files,
+  };
+}
+
+function auditPackagedDarwinLibrary(filePath) {
+  const unresolved = execFileSync("otool", ["-L", filePath], { encoding: "utf8" })
+    .split("\n").slice(1)
+    .map((line) => /^\s*(.+?)\s+\(compatibility version/.exec(line)?.[1])
+    .filter(Boolean)
+    .filter((dependency) => !dependency.startsWith("/System/Library/") && !dependency.startsWith("/usr/lib/"))
+    .filter((dependency) => {
+      if (!dependency.startsWith("@loader_path/")) return true;
+      const target = path.resolve(path.dirname(filePath), dependency.slice("@loader_path/".length));
+      return !existsSync(target);
+    });
+  return { unresolved };
+}
+
 async function inspectDmg(dmgPath, expectedMachO) {
   const mountPoint = await mkdtemp(path.join(os.tmpdir(), "fongmi-release-verify-"));
   try {
@@ -179,6 +274,7 @@ async function inspectDmg(dmgPath, expectedMachO) {
     const mountedHtml = asar.extractFile(asarPath, "dist/renderer/index.html").toString("utf8");
     if (/cdn\.jsdelivr/i.test(mountedHtml)) throw new Error("DMG 内应用仍包含 HLS CDN 引用");
     if (!/script-src 'self'/.test(mountedHtml)) throw new Error("DMG 内应用 CSP 未限制为本地脚本");
+    const nativeRuntime = await assessNativeRuntime(appPath, expectedMachO, requireNativeLibmpv);
 
     await Promise.all([
       stat(path.join(mountPoint, ".DS_Store")),
@@ -201,6 +297,7 @@ async function inspectDmg(dmgPath, expectedMachO) {
       artPlayerChunk: mountedArtPlayerChunks[0],
       thirdPartyNotices: true,
       localScriptsOnly: true,
+      nativeRuntime,
     };
   } finally {
     run("hdiutil", ["detach", mountPoint, "-quiet"]);

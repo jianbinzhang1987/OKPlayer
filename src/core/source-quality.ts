@@ -60,10 +60,9 @@ export function sourceFingerprint(site: SiteConfig): string {
 
 export function qualityHidesSource(record: SourceQualityRecord | undefined): boolean {
   if (record?.state !== "blocked") return false;
-  // 首页无推荐、搜索无结果、网络超时或规则运行时暂时失败，都不足以证明
-  // 该来源完全不能播放。只有静态不兼容或实际详情/播放/媒体链路的确定性失败
-  // 才从默认列表中隐藏，避免一次探测就误伤大量来源。
-  return ["static", "detail", "player", "media"].includes(record.stage);
+  // 自动检测或某个影片、线路的播放失败，只用于降序和提示，不再隐藏整个来源。
+  // 当前仅静态运行时不兼容可以从桌面端可选来源中排除。
+  return record.stage === "static";
 }
 
 export function qualityRecordMatches(record: SourceQualityRecord | undefined, site: SiteConfig): boolean {

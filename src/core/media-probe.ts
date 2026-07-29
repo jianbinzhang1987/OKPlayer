@@ -83,16 +83,17 @@ export async function probeMediaUrl(url: string, options: MediaProbeOptions = {}
     };
   }
 
-  const expectedFormat = options.expectedFormat?.toLowerCase();
-  if (expectedFormat && format && !formatsCompatible(expectedFormat, format)) {
+  const expectedFormat = normalizeMediaFormat(options.expectedFormat);
+  const actualFormat = normalizeMediaFormat(format);
+  if (expectedFormat && actualFormat && !formatsCompatible(expectedFormat, actualFormat)) {
     return {
       ok: false,
       url: response.url || url,
       statusCode: response.status,
       mimeType,
       bytesRead: prefix.length,
-      format,
-      reason: `媒体格式不匹配：期望 ${expectedFormat}，实际 ${format}`,
+      format: actualFormat,
+      reason: `媒体格式不匹配：期望 ${expectedFormat}，实际 ${actualFormat}`,
     };
   }
 
@@ -224,6 +225,21 @@ function extensionOf(value: string): string {
   } catch {
     return "";
   }
+}
+
+function normalizeMediaFormat(value?: string): string | undefined {
+  if (!value) return undefined;
+
+  const normalized = value.toLowerCase();
+  if (normalized.includes("mpegurl") || normalized.includes("m3u8") || normalized === "hls") return "hls";
+  if (normalized.includes("mp4")) return "mp4";
+  if (normalized.includes("dash") || normalized.includes("mpd")) return "dash";
+  if (normalized.includes("flv")) return "flv";
+  if (normalized.includes("webm")) return "webm";
+  if (normalized.includes("mpeg-ts") || normalized.includes("mpeg2")) return "mpeg-ts";
+  if (normalized.startsWith("video/")) return "video";
+  if (normalized.startsWith("audio/")) return "audio";
+  return normalized;
 }
 
 function formatsCompatible(expected: string, actual: string): boolean {

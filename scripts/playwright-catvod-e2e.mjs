@@ -73,11 +73,11 @@ async function launchApp({ isolateCatVod = false } = {}) {
 }
 
 async function go(name) {
-  await page.getByRole("button", { name, exact: true }).click();
+  await page.locator(".sidebar").getByRole("button", { name, exact: true }).click();
 }
 
 async function goSources() {
-  await go("播放源");
+  await go("内容来源");
   await page.locator(".quick-source-page").waitFor({ state: "visible", timeout: 10_000 });
 }
 
@@ -87,10 +87,10 @@ async function goSettings() {
 }
 
 async function importConfig(name, url, { expectSuccess = true } = {}) {
-  await goSettings();
+  await goSources();
   const card = page.locator(".source-config-settings-card");
-  await card.getByPlaceholder("例如：家庭配置").fill(name);
-  await card.getByPlaceholder("https://example.com/config.json").fill(url);
+  await card.getByPlaceholder("留空自动识别").fill(name);
+  await card.getByPlaceholder("粘贴配置地址后按回车即可导入").fill(url);
   await card.getByRole("button", { name: "导入并使用", exact: true }).click();
   if (expectSuccess) {
     await page.locator(".home-page").waitFor({ state: "visible", timeout: 25_000 });
@@ -99,8 +99,12 @@ async function importConfig(name, url, { expectSuccess = true } = {}) {
   }
 }
 
-async function sourceNames(selector = ".quick-source-section:last-of-type .quick-source-card") {
-  return page.locator(selector).evaluateAll((items) => items.map((item) => item.querySelector("strong")?.textContent?.trim() ?? ""));
+function allSourcesSection() {
+  return page.locator(".quick-source-section").last();
+}
+
+async function sourceNames() {
+  return allSourcesSection().locator(".quick-source-card").evaluateAll((items) => items.map((item) => item.querySelector("strong")?.textContent?.trim() ?? ""));
 }
 
 async function currentSourceName() {
@@ -151,6 +155,7 @@ try {
   );
 
   await goSettings();
+  await page.getByRole("button", { name: "展开高级设置", exact: true }).click();
   const catVodButtons = await page.locator(".catvod-actions button").allTextContents();
   record(
     "E2E-024",
@@ -173,7 +178,7 @@ try {
 
   await goSources();
   const allNames = await sourceNames();
-  const allCount = Number((await page.locator(".quick-source-section:last-of-type .quick-source-section-heading em").textContent())?.trim() ?? -1);
+  const allCount = Number((await allSourcesSection().locator(".quick-source-section-heading em").textContent())?.trim() ?? -1);
   record(
     "E2E-004",
     "播放源页面只展示可用影视来源",
@@ -213,11 +218,11 @@ try {
   record("E2E-006", "播放源页面分组筛选正确", groupsPassed, JSON.stringify(groupSnapshots));
 
   await page.locator(".quick-source-tabs button").filter({ hasText: "全部" }).click();
-  await page.locator(".quick-source-section:last-of-type .quick-source-card").filter({ hasText: "测试｜采集" }).click();
+  await allSourcesSection().locator(".quick-source-card").filter({ hasText: "测试｜采集" }).click();
   await page.waitForFunction(() => document.querySelector(".source-picker-trigger-copy strong")?.textContent?.includes("测试｜采集"));
   const cardSwitch = {
     current: await currentSourceName(),
-    activeCard: await page.locator(".quick-source-section:last-of-type .quick-source-card.active").textContent(),
+    activeCard: await allSourcesSection().locator(".quick-source-card.active").textContent(),
   };
   record(
     "E2E-007",
@@ -258,9 +263,9 @@ try {
   record("E2E-010", "顶部选择器切换后自动关闭并同步当前来源", pickerSwitch.current === "测试｜秒播" && pickerSwitch.closed, JSON.stringify(pickerSwitch));
 
   await goSources();
-  await page.locator(".quick-source-section:last-of-type .quick-source-card").filter({ hasText: "测试｜4K" }).click();
-  await page.locator(".quick-source-section:last-of-type .quick-source-card").filter({ hasText: "测试｜采集" }).click();
-  await page.locator(".quick-source-section:last-of-type .quick-source-card").filter({ hasText: "测试｜秒播" }).click();
+  await allSourcesSection().locator(".quick-source-card").filter({ hasText: "测试｜4K" }).click();
+  await allSourcesSection().locator(".quick-source-card").filter({ hasText: "测试｜采集" }).click();
+  await allSourcesSection().locator(".quick-source-card").filter({ hasText: "测试｜秒播" }).click();
   await page.waitForTimeout(700);
   const recentCardNames = await page.locator(".recent-source-grid .quick-source-card").evaluateAll((items) => items.map((item) => item.querySelector("strong")?.textContent?.trim() ?? ""));
   await page.getByRole("button", { name: "选择播放源" }).click();
@@ -312,7 +317,7 @@ try {
 
   await go("搜索");
   await page.locator(".search-page").waitFor({ state: "visible", timeout: 10_000 });
-  await page.locator(".search-scope button").filter({ hasText: "当前播放源" }).click();
+  await page.locator(".search-scope button").filter({ hasText: "仅当前来源" }).click();
   const searchInput = page.getByPlaceholder("搜索影片、电视剧、演员");
   await searchInput.fill("端到端测试影片");
   await searchInput.press("Enter");
@@ -419,7 +424,7 @@ try {
   });
 
   await importConfig("端到端配置 B", fixture.urls.configB);
-  await goSettings();
+  await goSources();
   const configRows = page.locator(".source-config-settings-row");
   const configA = configRows.filter({ hasText: "端到端配置 A" });
   const configB = configRows.filter({ hasText: "端到端配置 B" });
@@ -451,7 +456,7 @@ try {
   const renamedA = page.locator(".source-config-settings-row").filter({ hasText: "端到端配置 A（已重命名）" });
   await renamedA.getByRole("button", { name: "切换", exact: true }).click();
   await page.locator(".home-page").waitFor({ state: "visible", timeout: 20_000 });
-  await goSettings();
+  await goSources();
   const inactiveB = page.locator(".source-config-settings-row").filter({ hasText: "端到端配置 B" });
   await inactiveB.getByTitle("删除配置").click();
   const confirmVisible = await inactiveB.getByTitle("再次点击确认删除").isVisible();
@@ -480,9 +485,12 @@ try {
     JSON.stringify({ invalidError, importButtonText, unchanged: configsBeforeInvalid === configsAfterInvalid }),
   );
 
-  await page.locator(".error-message button").click();
+  await page.locator(".error-message .message-actions > button:last-child").click();
   const apiHitsBeforeAudit = fixture.totalApiHits();
-  await page.locator(".source-config-overview-actions button").click();
+  const auditButton = page.locator(".quick-source-header").getByRole("button", { name: "检查并修复", exact: true });
+  await auditButton.click();
+  await page.waitForFunction(() => document.querySelector(".quick-source-header button")?.hasAttribute("disabled"), undefined, { timeout: 10_000 });
+  await page.waitForFunction(() => !document.querySelector(".quick-source-header button")?.hasAttribute("disabled"), undefined, { timeout: 90_000 });
   await waitForAuditComplete();
   const apiHitsAfterAudit = fixture.totalApiHits();
   record(

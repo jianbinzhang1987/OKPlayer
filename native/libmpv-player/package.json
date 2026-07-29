@@ -1,0 +1,15 @@
+{
+  "name": "@fongmi/native-libmpv-player",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Optional Node-API bridge for embedding libmpv inside FongMi Desktop.",
+  "type": "commonjs",
+  "main": "build/Release/fongmi_libmpv_player.node",
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "clean": "node-gyp clean"
+  },
+  "gypfile": true,
+  "os": ["darwin", "win32", "linux"],
+  "cpu": ["x64", "arm64"]
+}

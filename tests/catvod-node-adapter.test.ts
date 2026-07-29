@@ -122,3 +122,22 @@ test("discovery CatVod site exposes home but disables detail, search and player 
   assert.equal(adapter.capabilities.detail, false);
   assert.equal(adapter.capabilities.player, false);
 });
+
+test("pan CatVod site supports folder browsing and playback without requiring a search endpoint", () => {
+  const client = new CatVodNodeClient({
+    baseUrl: () => "http://127.0.0.1:9988",
+    fetchImpl: async () => Response.json({}),
+  });
+  const adapter = new CatVodNodeAdapter({
+    key: "catvod:nodejs_mypan",
+    name: "我的网盘",
+    type: 15,
+    api: "catvod://service/spider/mypan/3",
+    contentType: "pan",
+  }, client);
+  assert.equal(adapter.capabilities.home, true);
+  assert.equal(adapter.capabilities.category, true);
+  assert.equal(adapter.capabilities.search, false);
+  assert.equal(adapter.capabilities.detail, true);
+  assert.equal(adapter.capabilities.player, true);
+});

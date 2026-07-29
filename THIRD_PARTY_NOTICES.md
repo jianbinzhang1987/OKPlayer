@@ -30,3 +30,20 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 - Purpose: HLS playback through Media Source Extensions when native HLS is unavailable
 
 The complete Apache License 2.0 text is available in the hls.js source distribution and its upstream repository.
+
+## Optional native media runtime: mpv / libmpv and FFmpeg
+
+Native high-compatibility packages may include mpv/libmpv, FFmpeg, codecs, subtitle libraries, TLS libraries, and other dynamically linked runtime components.
+
+The applicable license for mpv/libmpv and FFmpeg depends on the exact binary build configuration, enabled optional components, and the licenses of all linked libraries. It must not be inferred solely from the project name or from another distributor's build.
+
+Every formal native release must therefore include:
+
+- the exact distributed component version;
+- the declared SPDX-style license expression for that exact build;
+- an HTTP(S) corresponding-source location;
+- `Resources/libmpv/<platform>-<arch>/NATIVE_RUNTIME_NOTICES.md`;
+- `native-runtime-manifest.json` licensing metadata;
+- any complete license texts, written offers, attribution, relinking materials, or source-code obligations required by the declared licenses.
+
+The build pipeline permits `unverified` metadata only for local test packages. Formal native packaging and release verification reject unverified license declarations unless an explicit test-only override is used.

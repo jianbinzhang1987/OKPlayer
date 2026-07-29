@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { defineAsyncComponent, ref, watch } from "vue";
+import { computed, defineAsyncComponent, ref, watch } from "vue";
 import EmbeddedPlayer from "./EmbeddedPlayer.vue";
+import NativePlayerHost from "./NativePlayerHost.vue";
 import type {
   EmbeddedPlaybackSession,
   PlaybackProgress,
@@ -43,6 +44,7 @@ const emit = defineEmits<{
 }>();
 
 const activeEngine = ref<WebPlayerEngine>(props.engine);
+const usesNativeEngine = computed(() => props.session.engine === "mpv");
 const ArtPlayerHost = defineAsyncComponent(async () => {
   try {
     return (await import("./ArtPlayerHost.vue")).default;
@@ -63,9 +65,24 @@ function handleArtPlayerFailure(reason: string) {
 </script>
 
 <template>
-  <div class="player-container" :data-player-engine="activeEngine">
+  <div class="player-container" :data-player-engine="usesNativeEngine ? 'native' : activeEngine">
+    <NativePlayerHost
+      v-if="usesNativeEngine"
+      :session="props.session"
+      :default-speed="props.defaultSpeed"
+      :episodes="props.episodes"
+      :current-episode-url="props.currentEpisodeUrl"
+      :has-previous="props.hasPrevious"
+      :has-next="props.hasNext"
+      @progress="emit('progress', $event)"
+      @previous="emit('previous', $event)"
+      @next="emit('next', $event)"
+      @ended="emit('ended', $event)"
+      @select-episode="emit('selectEpisode', $event)"
+      @close="emit('close', $event)"
+    />
     <ArtPlayerHost
-      v-if="activeEngine === 'artplayer'"
+      v-else-if="activeEngine === 'artplayer'"
       :session="props.session"
       :default-speed="props.defaultSpeed"
       :compatibility-fallback-mode="props.compatibilityFallbackMode"

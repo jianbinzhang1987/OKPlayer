@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyQualityFailure, qualityHidesSource, sourceQualityMetrics, type SourceQualityRecord } from "../src/core/source-quality.ts";
 
-function record(state: SourceQualityRecord["state"], stage: SourceQualityRecord["stage"]): SourceQualityRecord {
+function record(state: SourceQualityRecord["state"], stage: SourceQualityRecord["stage"], failureCount = 0): SourceQualityRecord {
   return {
     configSource: "config",
     siteKey: "site",
@@ -12,7 +12,7 @@ function record(state: SourceQualityRecord["state"], stage: SourceQualityRecord[
     reason: "test",
     latencyMs: 0,
     checkedAt: 1,
-    failureCount: 0,
+    failureCount,
     successCount: 0,
   };
 }
@@ -23,11 +23,11 @@ test("temporary home search and runtime failures remain visible", () => {
   assert.equal(qualityHidesSource(record("blocked", "runtime")), false);
 });
 
-test("static incompatibility and definitive playback failures are hidden", () => {
+test("only static runtime incompatibility hides a source", () => {
   assert.equal(qualityHidesSource(record("blocked", "static")), true);
-  assert.equal(qualityHidesSource(record("blocked", "detail")), true);
-  assert.equal(qualityHidesSource(record("blocked", "player")), true);
-  assert.equal(qualityHidesSource(record("blocked", "media")), true);
+  assert.equal(qualityHidesSource(record("blocked", "detail", 1)), false);
+  assert.equal(qualityHidesSource(record("blocked", "player", 3)), false);
+  assert.equal(qualityHidesSource(record("blocked", "media", 8)), false);
 });
 
 test("only strict playback failures are classified as blocked", () => {

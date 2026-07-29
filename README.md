@@ -67,7 +67,7 @@ OKPlayer 希望把这些能力整理成一个更适合桌面端的应用：
 
 ## 下载
 
-最新版本：**OKPlayer v0.1.1**
+最新版本：**OKPlayer v0.1.2**
 
 前往 Release 页面下载：
 
@@ -75,12 +75,12 @@ OKPlayer 希望把这些能力整理成一个更适合桌面端的应用：
 
 | 系统 | 推荐下载文件 | 说明 |
 |---|---|---|
-| macOS Intel | `FongMi.Desktop-0.1.1-x64.dmg` | 适用于 Intel 芯片 Mac |
-| macOS Apple Silicon | `FongMi.Desktop-0.1.1-arm64.dmg` | 适用于 M1 / M2 / M3 / M4 等 Apple Silicon Mac |
-| Windows | `FongMi.Desktop.Setup.0.1.1.exe` | 安装版，适合大多数用户 |
-| Windows | `FongMi.Desktop.0.1.1.exe` | 便携版，适合临时试用 |
-| Linux | `FongMi.Desktop-0.1.1-x86_64.AppImage` | 通用 AppImage 包 |
-| Linux | `FongMi.Desktop-0.1.1-amd64.deb` | 适用于 Debian / Ubuntu 系发行版 |
+| macOS Intel | `FongMi.Desktop-0.1.2-x64.dmg` | 适用于 Intel 芯片 Mac，内置 native-libmpv 高兼容播放运行时 |
+| macOS Apple Silicon | `FongMi.Desktop-0.1.2-arm64.dmg` | 适用于 M1 / M2 / M3 / M4 等 Apple Silicon Mac，内置 native-libmpv 高兼容播放运行时 |
+| Windows | `FongMi.Desktop.Setup.0.1.2.exe` | 安装版，适合大多数用户 |
+| Windows | `FongMi.Desktop.0.1.2.exe` | 便携版，适合临时试用 |
+| Linux | `FongMi.Desktop-0.1.2-x86_64.AppImage` | 通用 AppImage 包 |
+| Linux | `FongMi.Desktop-0.1.2-amd64.deb` | 适用于 Debian / Ubuntu 系发行版 |
 
 Release 页面同时提供 `SHA256SUMS.txt`，可用于校验安装包完整性。
 

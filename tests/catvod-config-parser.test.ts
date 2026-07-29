@@ -8,6 +8,7 @@ test("parseCatVodConfig converts local API paths into dynamic CatVod sites", () 
       sites: [
         { key: "nodejs_douban", name: "豆瓣|首页", type: 3, api: "/spider/douban/3", searchable: 1, filterable: 1 },
         { key: "nodejs_wogg", name: "玩偶|4K", type: 3, api: "/spider/wogg/3", searchable: 1, filterable: 1 },
+        { key: "nodejs_mypan", name: "我的|网盘", type: 3, api: "/spider/mypan/3", searchable: 1, quickSearch: 1 },
         { key: "nodejs_huya", name: "虎牙|直播", type: 3, api: "/spider/huya/3" },
         { key: "nodejs_music", name: "小酷|音乐", type: 3, api: "/spider/music/3" },
         { key: "nodejs_baseset", name: "配置|中心", type: 3, api: "/spider/baseset/3" },
@@ -15,13 +16,16 @@ test("parseCatVodConfig converts local API paths into dynamic CatVod sites", () 
     },
   });
 
-  assert.equal(parsed.summary.siteCount, 5);
+  assert.equal(parsed.summary.siteCount, 6);
   assert.equal(parsed.summary.discoveryCount, 1);
   assert.equal(parsed.summary.vodCount, 1);
   assert.equal(parsed.summary.hiddenCount, 3);
+  assert.equal(parsed.sites.find((site) => site.key === "catvod:nodejs_mypan")?.searchable, 0);
+  assert.equal(parsed.sites.find((site) => site.key === "catvod:nodejs_mypan")?.quickSearch, 0);
   assert.deepEqual(parsed.sites.map((site) => [site.key, site.type, site.api, site.contentType, site.hide]), [
     ["catvod:nodejs_douban", 15, "catvod://service/spider/douban/3", "discovery", 0],
     ["catvod:nodejs_wogg", 15, "catvod://service/spider/wogg/3", "vod", 0],
+    ["catvod:nodejs_mypan", 15, "catvod://service/spider/mypan/3", "pan", 0],
     ["catvod:nodejs_huya", 15, "catvod://service/spider/huya/3", "live", 1],
     ["catvod:nodejs_music", 15, "catvod://service/spider/music/3", "audio", 1],
     ["catvod:nodejs_baseset", 15, "catvod://service/spider/baseset/3", "tool", 1],
@@ -58,5 +62,6 @@ test("classifyCatVodSite identifies major content categories", () => {
   assert.equal(classifyCatVodSite("manjuqimao", "漫剧小猫"), "comic");
   assert.equal(classifyCatVodSite("musicaikuwoa", "小酷音乐"), "audio");
   assert.equal(classifyCatVodSite("biliych", "哔哩歌曲"), "audio");
+  assert.equal(classifyCatVodSite("nodejs_mypan", "我的网盘"), "pan");
   assert.equal(classifyCatVodSite("wogg", "玩偶4K"), "vod");
 });

@@ -5,6 +5,7 @@ export type RendererErrorContext =
   | "search"
   | "source"
   | "config"
+  | "catvod"
   | "library"
   | "detail"
   | "records"
@@ -36,6 +37,7 @@ const CONTEXT_COPY: Record<RendererErrorContext, { message: string; action: Rend
   search: { message: "搜索暂时没有完成。", action: "retry-search", label: "重新搜索" },
   source: { message: "内容来源操作没有完成。", action: "repair-sources", label: "检查并修复" },
   config: { message: "内容来源配置没有处理成功。", action: "retry-configs", label: "重新加载配置" },
+  catvod: { message: "CatVod 服务源没有加载成功。", action: "retry-configs", label: "重新加载来源" },
   library: { message: "片库内容暂时无法加载。", action: "retry-library", label: "重新加载片库" },
   detail: { message: "影片详情暂时无法打开。", action: "back", label: "返回上一页" },
   records: { message: "本地收藏或观看记录操作没有完成。", action: "retry-records", label: "刷新记录" },

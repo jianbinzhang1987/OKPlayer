@@ -1,7 +1,10 @@
+export type PlaybackMode = "auto" | "standard" | "compatibility";
+
 export interface EmbeddedPlaybackSession {
   sessionId: string;
   playbackUrl: string;
   format: string;
+  engine?: "web" | "mpv";
   title: string;
   episode: string;
   siteKey: string;
@@ -28,4 +31,9 @@ export type WebPlayerEngine = "legacy" | "artplayer";
 
 export function normalizeWebPlayerEngine(value: unknown): WebPlayerEngine {
   return value === "artplayer" ? "artplayer" : "legacy";
+}
+
+export function normalizePlaybackMode(value: unknown): PlaybackMode {
+  if (value === "standard" || value === "compatibility") return value;
+  return "auto";
 }

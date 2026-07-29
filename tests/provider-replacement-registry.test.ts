@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import test from "node:test";
+import { AppService } from "../src/core/app-service.ts";
 import { auditVodConfig } from "../src/core/compatibility-audit.ts";
 import type { VodConfig } from "../src/core/models.ts";
 import { ProviderReplacementRegistry, type ProviderReplacement } from "../src/core/provider-replacement-registry.ts";
@@ -107,5 +108,35 @@ test("factory transparently runs a verified replacement and enforces capability 
     assert.equal(report.supported, 1);
     assert.equal(report.androidOnly.length, 0);
     assert.equal(report.replaced[0]?.replacement?.sourceName, "测试 HTTP 替代源");
+  });
+});
+
+test("source audit evaluates the effective replacement instead of ignoring the original Android runtime", async () => {
+  await withServer(async (origin) => {
+    const site = {
+      key: "guard-audit",
+      name: "Android Guard Audit",
+      type: 3,
+      api: "csp_NewDemoGuard",
+      jar: "https://example.com/spider.jar;md5;abc123",
+    };
+    const factory = new SourceAdapterFactory({ replacements: [replacement(site.api, origin)] });
+    const service = new AppService(":memory:", factory);
+    try {
+      await service.loadConfigText(JSON.stringify({ sites: [site] }), "memory://replacement-audit", "替代检测");
+      const initial = service.startSourceAudit(true);
+      assert.equal(initial.total, 1);
+      assert.equal(service.listSites()[0]?.supported, true);
+
+      for (let index = 0; index < 100 && service.getSourceAuditStatus().running; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const status = service.getSourceAuditStatus();
+      assert.equal(status.completed, 1);
+      assert.equal(status.blocked, 0);
+      assert.notEqual(service.listSites()[0]?.quality.state, "blocked");
+    } finally {
+      service.close();
+    }
   });
 });

@@ -23,6 +23,8 @@ test("renderer exposes CatVod source home category filters pagination and discov
   ]) assert.ok(source.includes(marker), `missing renderer marker: ${marker}`);
   assert.match(source, /category\.id/);
   assert.match(source, /libraryFilters\[group\.key\]/);
+  assert.match(source, /action === "serviceUpdated"[\s\S]*await startSourceAudit\(false\)/);
+
 });
 
 test("preload and main keep CatVod service control behind isolated IPC", async () => {
@@ -93,6 +95,10 @@ test("confirmed quick source prototype is implemented in the formal renderer", a
   assert.ok(source.includes('setSetting("recentSiteKeys", [...recentSourceKeys.value])'), "recent source persistence must pass a cloneable plain array over IPC");
   assert.ok(source.includes('setSetting("favoriteSourceKeys", [...favoriteSourceKeys.value])'), "favorite source persistence must pass a cloneable plain array over IPC");
   assert.ok(source.includes("restoringInitialSite"), "initial source restore must not overwrite the saved default site");
+  assert.ok(source.includes("activeSourcePackageSites.value"), "source picker and source page must stay within the active source package");
+  assert.ok(source.includes("pendingSourceImport.value = request"), "imports during playback must be queued instead of interrupting playback");
+  assert.ok(source.includes("await applyPendingSourceImport()"), "queued source imports must activate after playback closes or ends");
+  assert.ok(source.includes("stopPlaybackAndApplyPendingSource"), "the player must expose an explicit immediate-switch action");
   assert.ok(!source.includes("播放源状态</h2>"), "quick source page must not expose diagnostic details");
   assert.ok(prototype.includes("选择播放源"));
   assert.ok(prototype.includes("最近使用"));

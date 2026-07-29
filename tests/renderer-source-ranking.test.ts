@@ -8,7 +8,7 @@ test("content source lists share the quality ranking strategy", async () => {
   const source = await readFile(appPath, "utf8");
   for (const marker of [
     "sortSourcesByQuality",
-    "sourceQualityLabel",
+    "sourceStatusText",
     "activeSiteKey: activeSite.value",
     "recentSiteKeys: recentSourceKeys.value",
     "最近播放成功",

@@ -1,4 +1,4 @@
-import type { IpcMain } from "electron";
+import { BrowserWindow, type IpcMain } from "electron";
 import type { AppService, SearchTargetSelection } from "../core/app-service.ts";
 import type { CatVodRemoteAccessPolicy } from "../core/catvod/catvod-types.ts";
 import { redactSensitiveText } from "../core/log-redaction.ts";
@@ -42,7 +42,12 @@ export const EXTRA_CHANNELS = {
   PLAYER_PAUSE: "player:pause",
   PLAYER_SEEK: "player:seek",
   PLAYER_SPEED: "player:speed",
+  PLAYER_VOLUME: "player:volume",
+  PLAYER_MUTE: "player:mute",
   PLAYER_STOP: "player:stop",
+  PLAYER_NATIVE_ATTACH: "player:native-view:attach",
+  PLAYER_NATIVE_RESIZE: "player:native-view:resize",
+  PLAYER_NATIVE_DETACH: "player:native-view:detach",
   PLAYER_STATE: "player:state",
   PLAYBACK_PREPARE: "playback:prepare",
   PLAYBACK_CLOSE: "playback:close",
@@ -89,6 +94,25 @@ export interface CatVodIpcController {
   cancelPanLogin(taskId: string): Promise<PanLoginResult>;
 }
 
+function validateNativePlayerRect(value: unknown) {
+  const input = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const number = (field: string, minimum: number) => Math.max(minimum, Math.round(Number(input[field]) || 0));
+  return {
+    x: number("x", 0),
+    y: number("y", 0),
+    width: number("width", 1),
+    height: number("height", 1),
+  };
+}
+
+function nativeHandleToBigInt(handle: Buffer): bigint {
+  if (handle.length >= 8) return handle.readBigUInt64LE(0);
+  if (handle.length >= 4) return BigInt(handle.readUInt32LE(0));
+  let result = 0n;
+  for (let index = 0; index < handle.length; index += 1) result |= BigInt(handle[index] ?? 0) << BigInt(index * 8);
+  return result;
+}
+
 function validatePage(value: unknown): number {
   const page = Math.floor(Number(value) || 1);
   return Math.min(10_000, Math.max(1, page));
@@ -108,6 +132,7 @@ export function registerIpcHandlers(
     node: string;
     platform: NodeJS.Platform;
     arch: string;
+    nativeLibmpv?: unknown;
   },
   catVod?: CatVodIpcController,
 ) {
@@ -181,7 +206,26 @@ export function registerIpcHandlers(
   ipcMain.handle(EXTRA_CHANNELS.PLAYER_PAUSE, () => player.pause());
   ipcMain.handle(EXTRA_CHANNELS.PLAYER_SEEK, (_event, seconds: number) => player.seek(seconds));
   ipcMain.handle(EXTRA_CHANNELS.PLAYER_SPEED, (_event, speed: number) => player.setSpeed(speed));
+  ipcMain.handle(EXTRA_CHANNELS.PLAYER_VOLUME, (_event, volume: number) => player.setVolume(volume));
+  ipcMain.handle(EXTRA_CHANNELS.PLAYER_MUTE, (_event, muted: boolean) => player.setMuted(muted));
   ipcMain.handle(EXTRA_CHANNELS.PLAYER_STOP, () => player.stop());
+  ipcMain.handle(EXTRA_CHANNELS.PLAYER_NATIVE_ATTACH, async (event, rect: unknown) => {
+    if (player.getBackend() !== "native-libmpv") {
+      return { ok: false, backend: player.getBackend(), message: "当前使用 MPV IPC 高兼容后端" };
+    }
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error("无法获取播放器所属窗口");
+    const nativeHandle = nativeHandleToBigInt(ownerWindow.getNativeWindowHandle());
+    const result = await player.attachNativeView(nativeHandle, validateNativePlayerRect(rect)) as { ok?: boolean; message?: string; fallback?: boolean } | undefined;
+    return {
+      ok: result?.ok !== false,
+      backend: player.getBackend(),
+      message: result?.message ?? "原生视频视图已挂载",
+      ...(result?.fallback ? { fallback: true } : {}),
+    };
+  });
+  ipcMain.handle(EXTRA_CHANNELS.PLAYER_NATIVE_RESIZE, (_event, rect: unknown) => player.resizeNativeView(validateNativePlayerRect(rect)));
+  ipcMain.handle(EXTRA_CHANNELS.PLAYER_NATIVE_DETACH, () => player.detachNativeView());
   ipcMain.handle(EXTRA_CHANNELS.PLAYBACK_PREPARE, async (_event, input: PreparePlaybackInput) => {
     try {
       return { ok: true, data: await playback.prepare(input) };
@@ -197,13 +241,10 @@ export function registerIpcHandlers(
       return { ok: false, error: serializePlaybackFailure(error) };
     }
   });
-  ipcMain.handle(EXTRA_CHANNELS.PLAYBACK_EXTERNAL, async (_event, sessionId: string, preference: "iina" | "vlc" | "system") => {
-    try {
-      return { ok: true, data: await playback.openExternal(sessionId, preference) };
-    } catch (error) {
-      return { ok: false, error: serializePlaybackFailure(error) };
-    }
-  });
+  ipcMain.handle(EXTRA_CHANNELS.PLAYBACK_EXTERNAL, async () => ({
+    ok: false,
+    error: serializePlaybackFailure(new Error("外部播放器已禁用，请使用应用内播放或切换线路/来源。")),
+  }));
   ipcMain.handle(EXTRA_CHANNELS.PLAYBACK_CANCEL, () => playback.cancelPreparation());
   ipcMain.handle(EXTRA_CHANNELS.SNIFFER_RESOLVE, async (_event, siteKey: string, flag: string, episodeUrl: string) => {
     const result = await service.playerResult(siteKey, flag, episodeUrl);

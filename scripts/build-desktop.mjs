@@ -33,4 +33,10 @@ await Promise.all([
     entryPoints: ["src/desktop/catvod-bootstrap.ts"],
     outfile: "dist/main/catvod-bootstrap.cjs",
   }),
+  build({
+    ...common,
+    format: "cjs",
+    entryPoints: ["src/desktop/native-libmpv-probe.ts"],
+    outfile: "dist/main/native-libmpv-probe.cjs",
+  }),
 ]);

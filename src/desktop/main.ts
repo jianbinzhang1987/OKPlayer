@@ -21,6 +21,9 @@ import { CatVodProtocolService } from "./catvod-protocol-service.ts";
 import { DesktopPlaybackService } from "./desktop-playback-service.ts";
 import { MediaProtocolService, MEDIA_PROTOCOL_SCHEME } from "./media-protocol/media-protocol-service.ts";
 import { PlaybackSessionStore } from "./media-protocol/playback-session-store.ts";
+import { preflightNativeLibmpvAddon } from "./native-libmpv-addon.ts";
+import { NativeFallbackPlaybackController, UnavailablePlaybackController } from "./native-fallback-playback-controller.ts";
+import { NativeLibmpvController } from "./native-libmpv-controller.ts";
 import { createDesktopPlatformRuntime, DATABASE_FILENAME, PRODUCT_NAME } from "./platform/platform-runtime.ts";
 import { configureDesktopUserDataPath, migrateLegacyUserData } from "./platform/user-data-migration.ts";
 import { EXTRA_CHANNELS, registerIpcHandlers } from "./register-ipc.ts";
@@ -140,11 +143,18 @@ app.whenReady().then(async () => {
     }
   });
   new CatVodProtocolService(() => catVodProcess?.status().baseUrl, (input, init) => net.fetch(input, init)).register(protocol);
-  player = new PlayerService(new MpvController({
+  const nativeLibmpvPreferenceEnabled = service.storage.getSetting<boolean>("nativeLibmpvEnabled", true) !== false;
+  if (!nativeLibmpvPreferenceEnabled) process.env.FONGMI_ENABLE_NATIVE_LIBMPV = "0";
+  const nativeLibmpvAvailability = await preflightNativeLibmpvAddon();
+  const mpvIpcController = new MpvController({
     executable: platformRuntime.getMpvExecutable(),
     ipcPath: platformRuntime.getMpvIpcEndpoint(),
     platform: platformRuntime.nodePlatform,
-  }));
+  });
+  const playbackController = nativeLibmpvAvailability.available
+    ? new NativeFallbackPlaybackController(new NativeLibmpvController(), mpvIpcController, { allowWindowFallback: false })
+    : new UnavailablePlaybackController(nativeLibmpvAvailability.reason ?? "libmpv 原生内嵌插件不可用");
+  player = new PlayerService(playbackController);
   sniffer = new BrowserSnifferService();
   playbackSessions = new PlaybackSessionStore();
   new MediaProtocolService(
@@ -172,7 +182,8 @@ app.whenReady().then(async () => {
   const catVodController = {
     status: () => catVodProcess!.status(),
     start: async (sourceMd5Url?: string, remoteAccessPolicy?: CatVodRemoteAccessPolicy) => {
-      if (catVodProcess!.status().state === "running") assertCatVodPlaybackIdle();
+      const wasRunning = catVodProcess!.status().state === "running";
+      if (wasRunning) assertCatVodPlaybackIdle();
       const source = sourceMd5Url?.trim()
         || service!.storage.getSetting<string>("catVodMd5Url", DEFAULT_CATVOD_MD5_URL);
       const policy = remoteAccessPolicy === "block-startup"
@@ -184,6 +195,10 @@ app.whenReady().then(async () => {
       service!.storage.setSetting("catVodMd5Url", source);
       service!.storage.setSetting("catVodRemoteAccessPolicy", policy);
       catVodProcess!.setRemoteAccessPolicy(policy);
+      if (wasRunning) {
+        await catVodProcess!.stop();
+        await service!.clearDynamicSites();
+      }
       await catVodProcess!.start(source);
       return syncCatVodSites();
     },
@@ -239,9 +254,15 @@ app.whenReady().then(async () => {
     desktopPlatform: platformRuntime.platform,
     usesMacTrafficLights: platformRuntime.usesMacTrafficLights,
     supportsExternalIina: platformRuntime.supportsExternalIina,
+    playerBackend: player?.getBackend() ?? (nativeLibmpvAvailability.available ? "native-libmpv" : "mpv-ipc"),
+    nativeLibmpvPreferenceEnabled,
+    nativeLibmpv: nativeLibmpvAvailability,
     arch: process.arch,
   }), catVodController);
-  player.onState((state) => window?.webContents.send(EXTRA_CHANNELS.PLAYER_STATE, state));
+  player.onState((state) => {
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+    window.webContents.send(EXTRA_CHANNELS.PLAYER_STATE, state);
+  });
   await service.restoreReplacementRegistry();
   await service.restoreActiveConfig();
   createMainWindow();

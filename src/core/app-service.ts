@@ -92,6 +92,10 @@ interface QualityTarget {
   configSource: string;
 }
 
+interface SourceAuditTarget extends QualityTarget {
+  record?: SourceQualityRecord;
+}
+
 interface AuditOutcome {
   state: "healthy" | "unknown" | "degraded" | "blocked";
   stage: SourceQualityStage;
@@ -327,10 +331,11 @@ export class AppService {
     const startedAt = Date.now();
     try {
       const result = await context.adapter.home();
-      if (result.list.length > 0) {
-        this.recordQualitySuccess(context.configSource, context.adapter.site, "home", Date.now() - startedAt, "首页内容获取正常");
+      if (result.list.length > 0 || (result.categories?.length ?? 0) > 0) {
+        const reason = result.list.length > 0 ? "首页内容获取正常" : "首页分类获取正常";
+        this.recordQualitySuccess(context.configSource, context.adapter.site, "home", Date.now() - startedAt, reason);
       } else {
-        this.recordQualityFailure(context.configSource, context.adapter.site, "home", "首页未返回任何内容", Date.now() - startedAt);
+        this.recordQualityFailure(context.configSource, context.adapter.site, "home", "首页未返回内容或分类", Date.now() - startedAt);
       }
       this.annotateReferencedResult(result, context);
       return result;
@@ -348,7 +353,7 @@ export class AppService {
       .filter((site) => {
         const capability = getSiteCapability(site);
         if (!capability.supported || !capability.capabilities.home) return false;
-        if (["tool", "live", "comic", "audio", "short-drama"].includes(site.contentType ?? "")) return false;
+        if (["tool", "live", "comic", "audio", "short-drama", "pan"].includes(site.contentType ?? "")) return false;
         return !qualityHidesSource(this.matchingQuality(this.configSourceForSite(site), site));
       })
       .sort((left, right) => compareSourcesByQuality(
@@ -505,7 +510,7 @@ export class AppService {
       const episodeCount = vod.flags.reduce((count, line) => count + line.episodes.length, 0);
       if (episodeCount === 0) {
         const message = `播放源 ${context.adapter.site.name} 返回了详情，但没有可播放剧集`;
-        this.recordQualityFailure(context.configSource, context.adapter.site, "detail", message, Date.now() - startedAt, "blocked");
+        this.recordQualityFailure(context.configSource, context.adapter.site, "detail", message, Date.now() - startedAt, "degraded");
         throw new Error(message);
       }
       this.recordQualitySuccess(context.configSource, context.adapter.site, "detail", Date.now() - startedAt, `详情和剧集正常，共 ${episodeCount} 集`);
@@ -566,63 +571,76 @@ export class AppService {
 
   startSourceAudit(force = false): SourceAuditStatus {
     if (this.auditStatus.running) return this.getSourceAuditStatus();
-    if (!this.config) {
+
+    const groups: Array<{ config: VodConfig; configSource: string; sites: SiteConfig[] }> = [];
+    if (this.config) groups.push({
+      config: this.config,
+      configSource: this.currentConfigSource(),
+      sites: this.config.sites,
+    });
+    if (this.dynamicConfig) groups.push({
+      config: this.dynamicConfig,
+      configSource: CATVOD_CONFIG_SOURCE,
+      sites: this.dynamicSites,
+    });
+    if (!groups.length) {
       this.auditStatus = emptyAuditStatus();
       return this.getSourceAuditStatus();
     }
 
-    const config = this.config;
-    const configSource = this.currentConfigSource();
     const now = Date.now();
-    const supportedSites: SiteConfig[] = [];
-    const unsupportedSites: SiteConfig[] = [];
-    const existing = new Map(this.storage.listSourceQuality(configSource).map((record) => [record.siteKey, record] as const));
-    const skippedSites: SiteConfig[] = [];
-    const pendingSites: SiteConfig[] = [];
+    const supportedTargets: SourceAuditTarget[] = [];
+    const skippedTargets: SourceAuditTarget[] = [];
+    const pendingTargets: SourceAuditTarget[] = [];
 
-    for (const site of config.sites) {
-      const capability = getSiteCapability(site);
-      if (!capability.supported) {
-        unsupportedSites.push(site);
-        this.saveStaticBlocked(configSource, site, capability.reason ?? "当前设备不支持该播放源运行时");
-        continue;
+    for (const group of groups) {
+      const existing = new Map(this.storage.listSourceQuality(group.configSource).map((record) => [record.siteKey, record] as const));
+      for (const site of group.sites) {
+        const capability = this.sources.get(site.key) ?? getSiteCapability(site);
+        if (!capability.supported) {
+          this.saveStaticIgnored(group.configSource, site, capability.reason ?? "当前桌面版本忽略该播放源运行时");
+          continue;
+        }
+        if (!isAuditEligibleSite(site)) continue;
+
+        const record = existing.get(site.key);
+        const target: SourceAuditTarget = { site, config: group.config, configSource: group.configSource, record };
+        supportedTargets.push(target);
+        const terminal = record?.state === "healthy" || record?.state === "unknown" || record?.state === "degraded" || record?.state === "blocked";
+        const fresh = record?.fingerprint === sourceFingerprint(site)
+          && terminal
+          && now - record.checkedAt < SOURCE_AUDIT_FRESH_MS;
+        if (!force && fresh) skippedTargets.push(target);
+        else pendingTargets.push(target);
       }
-      supportedSites.push(site);
-      const record = existing.get(site.key);
-      const terminal = record?.state === "healthy" || record?.state === "unknown" || record?.state === "degraded" || record?.state === "blocked";
-      const fresh = record?.fingerprint === sourceFingerprint(site)
-        && terminal
-        && now - record.checkedAt < SOURCE_AUDIT_FRESH_MS;
-      if (!force && fresh) skippedSites.push(site);
-      else pendingSites.push(site);
     }
 
-    const counts = countAuditStates(skippedSites.map((site) => existing.get(site.key)));
+    const counts = countAuditStates(skippedTargets.map((target) => target.record));
     this.auditStatus = {
-      running: pendingSites.length > 0,
-      total: config.sites.length,
-      completed: skippedSites.length + unsupportedSites.length,
+      running: pendingTargets.length > 0,
+      total: supportedTargets.length,
+      completed: skippedTargets.length,
       healthy: counts.healthy,
       unknown: counts.unknown,
       degraded: counts.degraded,
-      blocked: counts.blocked + unsupportedSites.length,
-      skipped: skippedSites.length,
+      blocked: counts.blocked,
+      skipped: skippedTargets.length,
       startedAt: now,
-      ...(pendingSites.length === 0 ? { finishedAt: now } : {}),
+      ...(pendingTargets.length === 0 ? { finishedAt: now } : {}),
     };
 
-    if (!pendingSites.length) return this.getSourceAuditStatus();
+    if (!pendingTargets.length) return this.getSourceAuditStatus();
 
     const controller = new AbortController();
     this.auditController = controller;
-    this.auditPromise = mapConcurrent(pendingSites, SOURCE_AUDIT_CONCURRENCY, async (site) => {
+    this.auditPromise = mapConcurrent(pendingTargets, SOURCE_AUDIT_CONCURRENCY, async (target) => {
       if (controller.signal.aborted) return;
-      this.auditStatus.currentSiteKey = site.key;
-      this.auditStatus.currentSiteName = site.name;
-      this.saveChecking(configSource, site);
-      const outcome = await this.auditSingleSource(site, config, controller.signal);
+      this.auditStatus.currentSiteKey = target.site.key;
+      this.auditStatus.currentSiteName = target.site.name;
+      this.saveChecking(target.configSource, target.site);
+      const outcome = await this.auditSingleSource(target.site, target.config, controller.signal);
       if (controller.signal.aborted) return;
-      this.saveAuditOutcome(configSource, site, outcome);
+      this.saveAuditOutcome(target.configSource, target.site, outcome);
       this.auditStatus.completed += 1;
       this.auditStatus[outcome.state] += 1;
     }).then(() => undefined).finally(() => {
@@ -1154,21 +1172,20 @@ export class AppService {
     });
   }
 
-  private saveStaticBlocked(configSource: string, site: SiteConfig, reason: string): void {
+  private saveStaticIgnored(configSource: string, site: SiteConfig, reason: string): void {
     const current = this.matchingQuality(configSource, site);
-    const now = Date.now();
     this.storage.saveSourceQuality({
       configSource,
       siteKey: site.key,
       fingerprint: sourceFingerprint(site),
-      state: "blocked",
+      state: "unknown",
       stage: "static",
-      reason,
+      reason: `已忽略：${reason}`,
       latencyMs: 0,
       checkedAt: current?.checkedAt || Date.now(),
       failureCount: current?.failureCount ?? 0,
       successCount: current?.successCount ?? 0,
-      ...sourceQualityMetrics(current, "static", "failure", now),
+      ...sourceQualityMetrics(current, "static", "preserve"),
     });
   }
 
@@ -1191,9 +1208,8 @@ export class AppService {
 
   private saveAuditOutcome(configSource: string, site: SiteConfig, outcome: AuditOutcome): void {
     const current = this.matchingQuality(configSource, site);
-    const preserveVerifiedPlayback = current?.state === "healthy"
-      && outcome.state !== "blocked"
-      && ["home", "search", "runtime"].includes(outcome.stage);
+    const recentPlaybackSuccess = Number(current?.lastMediaSuccessAt ?? 0) > Date.now() - 30 * 24 * 60 * 60 * 1_000;
+    const preserveVerifiedPlayback = current?.state === "healthy" && recentPlaybackSuccess && outcome.state !== "healthy";
     const state = preserveVerifiedPlayback ? "healthy" : outcome.state;
     const now = Date.now();
     this.storage.saveSourceQuality({
@@ -1205,12 +1221,13 @@ export class AppService {
       reason: preserveVerifiedPlayback ? current.reason : outcome.reason,
       latencyMs: outcome.latencyMs,
       checkedAt: now,
-      failureCount: state === "healthy" ? 0 : outcome.state === "unknown" ? (current?.failureCount ?? 0) : (current?.failureCount ?? 0) + 1,
+      // 自动抽样只用于发现可用来源，不累计失败次数，也不覆盖真实播放成功。
+      failureCount: outcome.state === "healthy" ? 0 : (current?.failureCount ?? 0),
       successCount: (current?.successCount ?? 0) + (outcome.state === "healthy" ? 1 : 0),
       ...sourceQualityMetrics(
         current,
         outcome.stage,
-        outcome.state === "healthy" ? "success" : outcome.state === "unknown" ? "preserve" : "failure",
+        outcome.state === "healthy" ? "success" : "preserve",
         now,
       ),
     });
@@ -1218,36 +1235,54 @@ export class AppService {
 
   private async auditSingleSource(site: SiteConfig, config: VodConfig, signal: AbortSignal): Promise<AuditOutcome> {
     const startedAt = Date.now();
-    const capability = getSiteCapability(site);
+    const adapter = this.adapterFactory.create(site);
+    const capability = adapter;
+    const failures: string[] = [];
     if (!capability.supported) {
+      await adapter.destroy().catch(() => undefined);
       return {
-        state: "blocked",
+        state: "unknown",
         stage: "static",
-        reason: capability.reason ?? "当前设备不支持该播放源运行时",
+        reason: capability.reason ?? "当前桌面版本忽略该播放源运行时",
         latencyMs: 0,
       };
     }
-
-    const adapter = this.adapterFactory.create(site);
-    const failures: string[] = [];
     try {
       await runAuditOperation(() => adapter.init(), signal);
 
       let sample: Vod | undefined;
+      let categorySeed: string | undefined;
       if (capability.capabilities.home) {
         try {
           const home = await runAuditOperation((operationSignal) => adapter.home(operationSignal), signal);
-          sample = home.list.find((item) => item.vodTag !== "action") ?? home.list[0];
-          if (!home.list.length) failures.push("首页未返回内容");
+          sample = pickAuditSample(home.list);
+          categorySeed = home.categories?.[0]?.id;
+          if (!home.list.length && !categorySeed) failures.push("首页未返回内容");
         } catch (error) {
           failures.push(`首页：${errorMessage(error)}`);
         }
       }
 
+      if (!sample && categorySeed && capability.capabilities.category) {
+        try {
+          const category = await runAuditOperation(
+            (operationSignal) => adapter.category(categorySeed!, "1", {}, operationSignal),
+            signal,
+          );
+          sample = pickAuditSample(category.list);
+        } catch (error) {
+          failures.push(`分类：${errorMessage(error)}`);
+        }
+      }
+
       if (sample?.vodTag === "folder" && capability.capabilities.category) {
         try {
-          const category = await runAuditOperation((operationSignal) => adapter.category(sample!.vodId, "1", {}, operationSignal), signal);
-          sample = category.list.find((item) => item.vodTag !== "folder" && item.vodTag !== "action") ?? category.list[0];
+          for (let depth = 0; sample?.vodTag === "folder" && depth < 4; depth += 1) {
+            const category = await runAuditOperation((operationSignal) => adapter.category(sample!.vodId, "1", {}, operationSignal), signal);
+            const next = pickAuditSample(category.list);
+            if (!next || next.vodId === sample.vodId) break;
+            sample = next;
+          }
         } catch (error) {
           failures.push(`分类：${errorMessage(error)}`);
         }
@@ -1257,7 +1292,7 @@ export class AppService {
         for (const term of SOURCE_AUDIT_SEARCH_TERMS) {
           try {
             const search = await runAuditOperation((operationSignal) => adapter.search(term, "1", true, operationSignal), signal);
-            sample = search.list.find((item) => item.vodTag !== "folder" && item.vodTag !== "action") ?? search.list[0];
+            sample = pickAuditSample(search.list);
             if (sample) break;
           } catch (error) {
             failures.push(`搜索：${errorMessage(error)}`);
@@ -1277,11 +1312,20 @@ export class AppService {
         };
       }
 
+      if (sample.vodTag === "folder") {
+        return {
+          state: "unknown",
+          stage: "detail",
+          reason: "目录型来源需要登录或继续进入子目录，本次自动抽样不判定为不可用",
+          latencyMs: Date.now() - startedAt,
+        };
+      }
+
       if (!capability.capabilities.detail || !capability.capabilities.player) {
         return {
-          state: "blocked",
+          state: "unknown",
           stage: "static",
-          reason: "播放源缺少详情或播放能力",
+          reason: "该来源不是标准首页—详情—播放结构，本次自动抽样不判定为不可用",
           latencyMs: Date.now() - startedAt,
         };
       }
@@ -1290,9 +1334,9 @@ export class AppService {
       const episode = detail.flags.flatMap((line) => line.episodes.map((item) => ({ flag: line.flag, episode: item })))[0];
       if (!episode) {
         return {
-          state: "blocked",
+          state: "unknown",
           stage: "detail",
-          reason: "详情接口未返回可播放剧集",
+          reason: "本次抽样条目未返回可播放剧集，不代表该来源的其他影片不可用",
           latencyMs: Date.now() - startedAt,
         };
       }
@@ -1307,9 +1351,9 @@ export class AppService {
       );
       if (!resolved.url?.trim()) {
         return {
-          state: "blocked",
+          state: "degraded",
           stage: "player",
-          reason: "播放解析未返回有效地址",
+          reason: "本次抽样线路未解析出播放地址，来源仍保留供用户尝试其他影片或线路",
           latencyMs: Date.now() - startedAt,
         };
       }
@@ -1339,17 +1383,17 @@ export class AppService {
       }
 
       return {
-        state: classifyQualityFailure(probe.reason),
+        state: "degraded",
         stage: "media",
-        reason: `媒体地址检测失败：${probe.reason}`,
+        reason: `本次抽样媒体未通过自动探测：${probe.reason}；来源仍保留，真实播放结果优先于抽样结果`,
         latencyMs: Date.now() - startedAt,
       };
     } catch (error) {
       const message = errorMessage(error);
       return {
-        state: classifyQualityFailure(message),
+        state: isInconclusiveAuditFailure(message) ? "unknown" : "degraded",
         stage: inferFailureStage(message),
-        reason: message,
+        reason: `${message}；本次自动抽样不作为来源永久不可用依据`,
         latencyMs: Date.now() - startedAt,
       };
     } finally {
@@ -1423,6 +1467,17 @@ async function mapConcurrent<T, R>(values: T[], limit: number, worker: (value: T
   return output;
 }
 
+function pickAuditSample(list: Vod[]): Vod | undefined {
+  return list.find((item) => item.vodTag !== "folder" && item.vodTag !== "action")
+    ?? list.find((item) => item.vodTag === "folder")
+    ?? list.find((item) => item.vodTag !== "action")
+    ?? list[0];
+}
+
+function isInconclusiveAuditFailure(message: string): boolean {
+  return /(?:未登录|需要登录|请先登录|登录.*(?:失效|过期)|cookie|token|凭据|授权|扫码|目录|文件夹|HTTP\s*(?:401|403)|访问受限|需要会员)/i.test(message);
+}
+
 async function runAuditOperation<T>(task: ((signal: AbortSignal) => Promise<T>) | (() => Promise<T>), signal: AbortSignal): Promise<T> {
   const timeout = AbortSignal.timeout(SOURCE_AUDIT_OPERATION_TIMEOUT_MS);
   const combined = AbortSignal.any([signal, timeout]);
@@ -1437,6 +1492,12 @@ async function taskWithAbort<T>(task: Promise<T>, signal: AbortSignal): Promise<
     signal.addEventListener("abort", abort, { once: true });
     task.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
   });
+}
+
+function isAuditEligibleSite(site: SiteConfig): boolean {
+  if (site.hide === 1) return false;
+  if (["discovery", "tool", "live", "comic", "audio"].includes(site.contentType ?? "")) return false;
+  return true;
 }
 
 function isSearchEligibleSite(site: SiteConfig): boolean {

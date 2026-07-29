@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { prepareHttpRequest } from "./http-auth.ts";
 import { parseLooseData } from "./drpy-operation-runtime.ts";
 import type { ParseConfig, SiteConfig, VodConfig } from "./models.ts";
 
@@ -222,9 +223,10 @@ export function setConfigFetch(fetcher?: ConfigFetch): void {
 
 async function readHttpText(source: string): Promise<{ text: string; sourceUrl: string }> {
   try {
-    const response = await configFetch(source, { redirect: "follow", signal: AbortSignal.timeout(20_000) });
+    const request = prepareHttpRequest(source, { redirect: "follow", signal: AbortSignal.timeout(20_000) });
+    const response = await configFetch(request.url, request.init);
     if (!response.ok) throw new Error(`配置下载失败：HTTP ${response.status}`);
-    return { text: await response.text(), sourceUrl: response.url || source };
+    return { text: await response.text(), sourceUrl: response.url || request.url };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`配置下载失败：${message}`);
