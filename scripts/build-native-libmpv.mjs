@@ -23,6 +23,7 @@ execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build", 
   cwd: projectDir,
   stdio: "inherit",
   env: process.env,
+  shell: process.platform === "win32",
 });
 if (!existsSync(buildOutput)) throw new Error(`Native libmpv addon was not produced: ${buildOutput}`);
 await mkdir(distributionDir, { recursive: true });

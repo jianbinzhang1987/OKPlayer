@@ -68,6 +68,8 @@ test("native libmpv project layout is present and package-aware", async () => {
   const runtimePreparer = await readFile(new URL("../scripts/prepare-libmpv-runtime.mjs", import.meta.url), "utf8");
   const afterPack = await readFile(new URL("../scripts/after-pack-native-runtime.mjs", import.meta.url), "utf8");
   const packagedE2e = await readFile(new URL("../scripts/playwright-packaged-native-libmpv-e2e.mjs", import.meta.url), "utf8");
+  const nativeBuilder = await readFile(new URL("../scripts/build-native-libmpv.mjs", import.meta.url), "utf8");
+  const nativePackager = await readFile(new URL("../scripts/package-native-libmpv.mjs", import.meta.url), "utf8");
   const workflow = await readFile(new URL("../.github/workflows/desktop-cross-platform.yml", import.meta.url), "utf8");
   assert.ok(dynamicLoader.includes("const char* loader_error = dlerror()"));
   assert.ok(dynamicLoader.includes("selected.is_absolute()"));
@@ -124,6 +126,8 @@ test("native libmpv project layout is present and package-aware", async () => {
   assert.ok(packagedE2e.includes("preparedManifestPathSanitized"));
   assert.ok(workflow.includes("Build native libmpv addon"));
   assert.ok(workflow.includes("libx11-dev"));
+  assert.ok(nativeBuilder.includes('shell: process.platform === "win32"'));
+  assert.ok(nativePackager.includes('shell: process.platform === "win32"'));
   assert.ok(loader.includes("process.env.FONGMI_LIBMPV_LIBRARY = libraryPath"));
   assert.ok(loader.includes("hasPackagedNativeLibmpvRuntime"));
 });

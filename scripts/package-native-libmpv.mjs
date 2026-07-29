@@ -61,5 +61,10 @@ function selectPackageScript(platform, arch, mode) {
 }
 
 function run(command, args, env) {
-  execFileSync(command, args, { cwd: root, env, stdio: "inherit" });
+  execFileSync(command, args, {
+    cwd: root,
+    env,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
 }
