@@ -32,7 +32,14 @@ void* OpenLibrary(const std::string& path, std::string* error) {
   // nullptr into std::string is undefined behaviour (and previously caused
   // the addon availability probe to crash when libmpv was absent).
   dlerror();
-  void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  int flags = RTLD_NOW | RTLD_LOCAL;
+#if defined(__linux__) && defined(RTLD_DEEPBIND)
+  // Electron/Chromium already exports FFmpeg symbols in the main process.
+  // Without deep binding, libmpv can resolve against Chromium's incompatible
+  // libav* ABI instead of the dependency set selected for this libmpv build.
+  flags |= RTLD_DEEPBIND;
+#endif
+  void* handle = dlopen(path.c_str(), flags);
   if (!handle && error) {
     const char* loader_error = dlerror();
     *error = loader_error ? loader_error : "dlopen failed";
