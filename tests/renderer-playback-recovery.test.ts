@@ -123,7 +123,9 @@ test("netdisk credentials are pre-checked before playback and prompt login when 
   assert.ok(app.includes('status.accountState === "not-configured"'));
   assert.ok(app.includes("precheckProvider"));
   assert.ok(app.includes("detectPanPlaybackProvider(item, flag, episode)"));
-  assert.ok(app.includes("await startPanLogin(precheckProvider)"));
+  assert.ok(app.includes("promptPanLoginBeforePlayback"));
+  assert.ok(app.includes("await refreshPanStatus()"));
+  assert.ok(app.includes("await startPanLogin(provider)"));
   // The 401/403 backstop during playback stays in place.
   assert.ok(app.includes("playbackNeedsPanLogin(e)"));
 });

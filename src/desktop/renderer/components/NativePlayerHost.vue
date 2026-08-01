@@ -243,8 +243,8 @@ async function previousEpisode() {
   if (!props.hasPrevious) return;
   const progress = snapshot();
   emit("progress", progress);
-  await detachNativeSurface();
-  await stopNativePlayback();
+  status.value = "loading";
+  errorMessage.value = "";
   emit("previous", progress);
 }
 
@@ -252,8 +252,8 @@ async function nextEpisode() {
   if (!props.hasNext) return;
   const progress = snapshot();
   emit("progress", progress);
-  await detachNativeSurface();
-  await stopNativePlayback();
+  status.value = "loading";
+  errorMessage.value = "";
   emit("next", progress);
 }
 
@@ -265,6 +265,20 @@ async function selectEpisode(episodeUrl: string) {
   await detachNativeSurface();
   await stopNativePlayback();
   emit("selectEpisode", { episodeUrl, progress });
+}
+
+async function toggleEpisodeDrawer() {
+  const opening = !episodeDrawerOpen.value;
+  episodeDrawerOpen.value = opening;
+  // A native child view sits above renderer DOM. Hide it while the drawer is
+  // open so every episode remains clickable instead of being covered by video.
+  if (opening) {
+    await detachNativeSurface();
+  } else if (!stopRequested && status.value !== "error") {
+    await attachNativeSurface().catch((error) => {
+      errorMessage.value = friendlyPlaybackError(error);
+    });
+  }
 }
 
 function handlePlayerState(state: { position?: number; duration?: number; paused?: boolean; stopped?: boolean; volume?: number; muted?: boolean }) {
@@ -388,12 +402,12 @@ onBeforeUnmount(() => {
 <template>
   <section class="native-player-host" :class="`state-${status}`">
     <header class="native-player-topbar">
-      <button class="native-icon-button" title="返回" @click="closePlayer"><AppIcon name="close" :size="17" /></button>
-      <div>
+      <div class="native-player-title">
         <small>高兼容播放模式</small>
         <strong>{{ session.title }} · {{ session.episode }}</strong>
       </div>
       <em>{{ statusText }}</em>
+      <button class="native-control-button native-back-button" title="停止播放并返回影片详情" @click="closePlayer"><AppIcon name="back" :size="16" />返回详情</button>
     </header>
 
     <main ref="nativeSurface" class="native-player-stage" :class="{ 'native-surface-attached': nativeSurfaceAttached }">
@@ -420,11 +434,11 @@ onBeforeUnmount(() => {
       <select v-model.number="speed" class="native-speed" @change="changeSpeed"><option :value="0.75">0.75×</option><option :value="1">1.0×</option><option :value="1.25">1.25×</option><option :value="1.5">1.5×</option><option :value="2">2.0×</option></select>
       <button class="native-control-button compact" :disabled="status === 'loading'" @click="toggleMute">{{ muted || volume <= 0 ? '静音' : '音量' }}</button>
       <input class="native-volume" type="range" min="0" max="100" v-model.number="volume" :title="`音量 ${Math.round(volume)}%`" @input="changeVolume" />
-      <button class="native-control-button" @click="episodeDrawerOpen = !episodeDrawerOpen"><AppIcon name="grid" :size="16" />选集</button>
+      <button class="native-control-button" @click="toggleEpisodeDrawer"><AppIcon name="grid" :size="16" />选集</button>
     </footer>
 
     <aside v-if="episodeDrawerOpen" class="native-episode-drawer">
-      <header><strong>选集</strong><button class="native-icon-button" @click="episodeDrawerOpen = false"><AppIcon name="close" :size="15" /></button></header>
+      <header><strong>选集</strong><button class="native-icon-button" @click="toggleEpisodeDrawer"><AppIcon name="close" :size="15" /></button></header>
       <button v-for="episode in episodes" :key="episode.url" :class="{ active: episode.url === currentEpisodeUrl }" @click="selectEpisode(episode.url)">{{ episode.name }}</button>
     </aside>
   </section>
@@ -433,7 +447,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .native-player-host { position: fixed; inset: 0; display: flex; flex-direction: column; background: #05070b; color: #fff; overflow: hidden; }
 .native-player-topbar { height: 68px; display: flex; align-items: center; gap: 14px; padding: 0 20px; border-bottom: 1px solid rgba(255,255,255,.08); background: rgba(7,10,16,.92); }
-.native-player-topbar div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.native-player-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .native-player-topbar small { color: rgba(255,255,255,.52); letter-spacing: .12em; font-size: 11px; }
 .native-player-topbar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
 .native-player-topbar em { color: rgba(255,255,255,.68); font-style: normal; font-size: 13px; }
@@ -447,6 +461,7 @@ onBeforeUnmount(() => {
 .native-icon-button,.native-control-button { border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.06); color: #fff; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
 .native-icon-button { width: 36px; height: 36px; }
 .native-control-button { height: 38px; padding: 0 12px; }
+.native-back-button { flex: 0 0 auto; }
 .native-control-button.compact { min-width: 54px; padding: 0 10px; }
 .native-control-button:disabled { opacity: .45; }
 .native-time { min-width: 48px; color: rgba(255,255,255,.68); font-variant-numeric: tabular-nums; text-align: center; font-size: 12px; }

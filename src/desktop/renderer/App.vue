@@ -477,7 +477,25 @@ const homeTvItems = computed(() => homeTvSourceItems.value.length
   ? homeTvSourceItems.value
   : selectHomeSection(homeItems.value, "tv", new Set([...continueIdentitySet.value, ...heroIdentitySet.value]), 6));
 const homeWallItems = computed(() => [...homeMovieItems.value, ...homeTvItems.value]);
-const recentHistory = computed(() => histories.value.slice(0, 4));
+// A title may be available through several content sources, each with its own
+// site key and vod id.  History deliberately keeps those records separate so
+// that resuming can use the original playable URL, but the home shelf should
+// represent the video rather than every source that supplied it.
+function historyVideoIdentity(item: Pick<HistoryRecord, "vodName">): string {
+  return item.vodName
+    .normalize("NFKC")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .toLocaleLowerCase("zh-CN");
+}
+
+const recentHistory = computed(() => {
+  const videos = new Map<string, HistoryRecord>();
+  for (const history of histories.value) {
+    const identity = historyVideoIdentity(history) || `${history.siteKey}\u0000${history.vodId}`;
+    if (!videos.has(identity)) videos.set(identity, history);
+  }
+  return [...videos.values()].slice(0, 4);
+});
 const continueItems = computed(() => recentHistory.value.map((history) => ({
   ...history,
   vodPic: homeItems.value.find((item) => item.siteKey === history.siteKey && item.vodId === history.vodId)?.vodPic
@@ -962,6 +980,34 @@ function detectPanProviderFromContext(context: string): PanProviderId | undefine
 
 function detectPanPlaybackProvider(item: Vod, flag: string, episode: Episode): PanProviderId | undefined {
   return detectPanProviderFromContext(`${item.siteKey ?? ""} ${item.siteName ?? ""} ${flag} ${episode.name}`);
+}
+
+async function promptPanLoginBeforePlayback(
+  provider: PanProviderId,
+  item: Vod,
+  flag: string,
+  episode: Episode,
+  startPosition: number,
+): Promise<boolean> {
+  // Status is normally refreshed only when the Accounts page is opened. Do
+  // it here as well: otherwise a first-time UC/Quark selection has no cached
+  // status and reaches the provider first, producing its raw "Cookie missing"
+  // response instead of the QR code the user needs.
+  if (!panStatuses.value[provider]) await refreshPanStatus();
+  const status = panStatuses.value[provider];
+  // Some CatVod provider builds expose login/start even when their aggregate
+  // status endpoint is unavailable. For a recognised netdisk line, prefer the
+  // QR flow in that unknown state to sending an unauthenticated play request.
+  if (status?.login) return false;
+  if (status && !shouldPromptPanLoginBeforePlayback(status) && status.accountState !== "unavailable") return false;
+  pendingPanPlayback.value = {
+    item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
+    flag,
+    episode: { ...episode },
+    startPosition: Math.max(0, startPosition),
+  };
+  await startPanLogin(provider);
+  return true;
 }
 
 async function clearExternalFallbackSession(): Promise<void> {
@@ -1963,6 +2009,10 @@ function backFromDetail() {
   page.value = previousPage.value;
 }
 
+function selectPlaybackLine(flag: string) {
+  if (selected.value?.flags?.some((line) => line.flag === flag)) selectedFlag.value = flag;
+}
+
 async function toggleFavorite() {
   const item = selected.value;
   if (!item?.siteKey) return;
@@ -2073,16 +2123,7 @@ async function play(
   // status may still be a playable public share, so it falls through to the
   // 401/403 backstop during playback.
   const precheckProvider = detectPanPlaybackProvider(item, flag, episode);
-  if (precheckProvider && shouldPromptPanLoginBeforePlayback(panStatuses.value[precheckProvider])) {
-    pendingPanPlayback.value = {
-      item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
-      flag,
-      episode: { ...episode },
-      startPosition: Math.max(0, startPosition),
-    };
-    await startPanLogin(precheckProvider);
-    return;
-  }
+  if (precheckProvider && await promptPanLoginBeforePlayback(precheckProvider, item, flag, episode, startPosition)) return;
   await clearExternalFallbackSession();
   const requestId = ++playbackRequestId;
   let preparedSessionId = "";
@@ -2317,10 +2358,15 @@ async function switchEmbeddedEpisode(episodeUrl: string, progress: PlaybackProgr
   if (!episode) return;
 
   await saveEmbeddedProgress(progress);
-  await window.tvApi.closePlayback(current.sessionId);
-  playing.value = null;
+  const previousSessionId = current.sessionId;
+  // Keep the current native session alive until the next one has been
+  // prepared. Stopping it first leaves libmpv with an empty surface whenever a
+  // provider takes a moment to resolve the next episode.
   paused.value = false;
   await play(navigation.flag, episode, 0);
+  if (playing.value?.sessionId !== previousSessionId) {
+    await window.tvApi.closePlayback(previousSessionId).catch(() => undefined);
+  }
 }
 
 async function playPreviousEmbeddedEpisode(progress: PlaybackProgress) {
@@ -3368,7 +3414,7 @@ onBeforeUnmount(() => {
               <span>{{ activeLine?.episodes.length ?? 0 }} 集</span>
             </div>
             <div v-if="selected.flags?.length" class="line-tabs">
-              <button v-for="line in selected.flags" :key="line.flag" :class="{ active: selectedFlag === line.flag }" @click="selectedFlag = line.flag">{{ line.show || line.flag }}{{ preferredPlaybackLine?.flag === line.flag ? ' · 推荐' : '' }}</button>
+              <button v-for="line in selected.flags" :key="line.flag" :class="{ active: selectedFlag === line.flag }" @click="selectPlaybackLine(line.flag)">{{ line.show || line.flag }}{{ preferredPlaybackLine?.flag === line.flag ? ' · 推荐' : '' }}</button>
             </div>
             <div v-if="activeLine?.episodes.length" class="episode-grid">
               <button v-for="episode in activeLine.episodes" :key="episode.url" :class="{ watched: selectedHistory?.episodeUrl === episode.url }" @click="play(activeLine.flag, episode, selectedHistory?.episodeUrl === episode.url ? selectedHistory.position : 0)">
