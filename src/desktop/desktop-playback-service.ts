@@ -202,7 +202,9 @@ export class DesktopPlaybackService {
 
   private async resolveMedia(input: PreparePlaybackInput, signal: AbortSignal): Promise<ResolvedMedia> {
     try {
-      const resolved = await this.source.resolve(input.siteKey, input.flag, input.episodeUrl, signal);
+      const resolved = unwrapLocalPanProxyMedia(
+        await this.source.resolve(input.siteKey, input.flag, input.episodeUrl, signal),
+      );
       const likelyPlaybackPage = isLikelyPlaybackPage(resolved.url);
       const explicitDirectMedia = isLikelyDirectMediaUrl(resolved.url);
       if (!likelyPlaybackPage && shouldProbeResolvedMedia(resolved, explicitDirectMedia)) {
@@ -325,8 +327,77 @@ function isLikelyDirectMediaUrl(value: string): boolean {
 
 function shouldProbeResolvedMedia(media: ResolvedMedia, explicitDirectMedia: boolean): boolean {
   if (explicitDirectMedia) return true;
+  if (isLocalPanProxyUrl(media.url)) return true;
   if (media.format && media.format !== "unknown") return true;
   return Object.keys(media.headers).some((key) => /^(?:cookie|referer|user-agent|authorization)$/i.test(key));
+}
+
+function isLocalPanProxyUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const local = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
+    return local && /\/proxy\/(?:quark|baidu|uc|pan115|pan189|pan139)(?:\/|$)/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+const PAN_PROXY_HEADER_ALLOWLIST = new Set([
+  "accept",
+  "accept-language",
+  "authorization",
+  "cookie",
+  "origin",
+  "referer",
+  "referrer",
+  "user-agent",
+]);
+
+function unwrapLocalPanProxyMedia(media: ResolvedMedia): ResolvedMedia {
+  try {
+    const proxyUrl = new URL(media.url);
+    const local = proxyUrl.hostname === "127.0.0.1" || proxyUrl.hostname === "localhost" || proxyUrl.hostname === "::1";
+    if (!local || !/\/proxy\/(?:quark|baidu|uc|pan115|pan189|pan139)(?:\/|$)/i.test(proxyUrl.pathname)) return media;
+    const payload = proxyUrl.searchParams.get("pst")?.trim();
+    if (!payload || payload.length > 64 * 1024) return media;
+
+    const decoded = decodeBase64UrlJson(payload);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return media;
+    const record = decoded as Record<string, unknown>;
+    const upstreamValue = typeof record.url === "string" ? record.url.trim() : "";
+    const upstreamUrl = new URL(upstreamValue);
+    if (!["http:", "https:"].includes(upstreamUrl.protocol) || upstreamUrl.username || upstreamUrl.password) return media;
+
+    const decodedHeaders = sanitizePanProxyHeaders(record.headers);
+    return {
+      ...media,
+      url: upstreamUrl.toString(),
+      headers: { ...decodedHeaders, ...media.headers },
+    };
+  } catch {
+    return media;
+  }
+}
+
+function decodeBase64UrlJson(value: string): unknown {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  const decoded = Buffer.from(padded, "base64").toString("utf8");
+  if (!decoded || decoded.length > 64 * 1024) return undefined;
+  return JSON.parse(decoded) as unknown;
+}
+
+function sanitizePanProxyHeaders(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const output: Record<string, string> = {};
+  for (const [name, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedName = name.trim().toLowerCase();
+    if (!PAN_PROXY_HEADER_ALLOWLIST.has(normalizedName) || typeof rawValue !== "string") continue;
+    const headerValue = rawValue.trim();
+    if (!headerValue || /[\r\n]/.test(headerValue) || headerValue.length > 16 * 1024) continue;
+    output[name] = headerValue;
+  }
+  return output;
 }
 
 function isDefinitiveDirectProbeFailure(result: MediaProbeResult): boolean {

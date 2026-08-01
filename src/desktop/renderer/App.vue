@@ -152,6 +152,7 @@ type FavoriteRecord = {
   createdAt: number;
 };
 type PlaybackProgress = { position: number; duration: number; completed: boolean };
+type CompatibilityPlaybackFailure = { progress: PlaybackProgress; reason: string };
 type AppInfo = {
   name: string;
   version: string;
@@ -2326,6 +2327,36 @@ async function fallbackEmbeddedPlayback(progress: PlaybackProgress) {
   await loadLibrary(false);
 }
 
+async function handleCompatibilityPlaybackFailure(payload: CompatibilityPlaybackFailure) {
+  const current = playing.value;
+  if (!current) return;
+  const item = selected.value?.siteKey === current.siteKey && selected.value.vodId === current.vodId
+    ? selected.value
+    : undefined;
+  const currentLine = item?.flags?.find((line) => line.flag === current.flag);
+  const currentEpisode = currentLine?.episodes.find((episode) => episode.url === current.episodeUrl)
+    ?? { name: current.episode, url: current.episodeUrl };
+  const fallback = resolveFallbackPlaybackLine(item?.flags, current.flag, currentEpisode, [current.flag], "stable");
+  if (!fallback) {
+    playbackStatus.value = `${payload.reason} 当前内容没有可继续尝试的备用线路。`;
+    return;
+  }
+
+  await saveEmbeddedProgress(payload.progress);
+  await window.tvApi.stop?.().catch(() => undefined);
+  await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+  playing.value = null;
+  paused.value = false;
+  selectedFlag.value = fallback.line.flag;
+  playbackStatus.value = `线路“${current.flag}”的高兼容播放失败，正在自动切换到“${fallback.line.show || fallback.line.flag}”…`;
+  await play(
+    fallback.line.flag,
+    fallback.episode,
+    Math.max(0, payload.progress.position),
+    [current.flag],
+  );
+}
+
 async function refreshSourceStatus() {
   checkingSite.value = "__all__";
   contentSourceMessage.value = "正在检查并修复内容来源…";
@@ -3607,6 +3638,7 @@ onBeforeUnmount(() => {
       @select-episode="selectEmbeddedEpisode"
       @close="closeEmbeddedPlayback"
       @fallback="fallbackEmbeddedPlayback"
+      @compatibility-failure="handleCompatibilityPlaybackFailure"
       @engine-fallback="handleWebPlayerEngineFallback"
     />
     <div v-if="playing && pendingSourceImport" class="pending-source-switch-banner">

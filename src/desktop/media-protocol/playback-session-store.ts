@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { HeadersMap, ResolvedMedia } from "../../core/models.ts";
 
-export type PlaybackMediaFormat = "hls" | "dash" | "mp4" | "webm" | "flv" | "mpeg-ts" | "audio" | "unknown";
+export type PlaybackMediaFormat = "hls" | "dash" | "mp4" | "mkv" | "webm" | "flv" | "mpeg-ts" | "audio" | "unknown";
 export type PlaybackResourceKind = "manifest" | "segment" | "key" | "subtitle" | "danmaku" | "initialization" | "media";
 
 export interface PlaybackMetadata {
@@ -173,6 +173,7 @@ export function normalizePlaybackFormat(format: string | undefined, url: string)
   if (normalized === "hls" || normalized === "m3u8") return "hls";
   if (normalized === "dash" || normalized === "mpd") return "dash";
   if (normalized === "mp4" || normalized === "m4v" || normalized === "mov") return "mp4";
+  if (normalized === "mkv" || normalized === "matroska" || normalized === "video/x-matroska") return "mkv";
   if (normalized === "webm") return "webm";
   if (normalized === "flv") return "flv";
   if (normalized === "mpeg-ts" || normalized === "ts") return "mpeg-ts";
@@ -182,6 +183,7 @@ export function normalizePlaybackFormat(format: string | undefined, url: string)
   if (extension === "m3u8") return "hls";
   if (extension === "mpd") return "dash";
   if (["mp4", "m4v", "mov"].includes(extension)) return "mp4";
+  if (extension === "mkv") return "mkv";
   if (extension === "webm") return "webm";
   if (extension === "flv") return "flv";
   if (extension === "ts") return "mpeg-ts";

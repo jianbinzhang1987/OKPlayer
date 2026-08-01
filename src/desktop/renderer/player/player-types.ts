@@ -22,6 +22,11 @@ export interface PlaybackProgress {
   completed: boolean;
 }
 
+export interface CompatibilityPlaybackFailure {
+  progress: PlaybackProgress;
+  reason: string;
+}
+
 export interface PlayerEpisode {
   name: string;
   url: string;

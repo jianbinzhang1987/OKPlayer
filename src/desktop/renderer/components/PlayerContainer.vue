@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, ref, watch } from "vue";
 import EmbeddedPlayer from "./EmbeddedPlayer.vue";
 import NativePlayerHost from "./NativePlayerHost.vue";
 import type {
+  CompatibilityPlaybackFailure,
   EmbeddedPlaybackSession,
   PlaybackProgress,
   PlayerEpisode,
@@ -39,6 +40,7 @@ const emit = defineEmits<{
   previous: [progress: PlaybackProgress];
   next: [progress: PlaybackProgress];
   ended: [progress: PlaybackProgress];
+  compatibilityFailure: [payload: CompatibilityPlaybackFailure];
   selectEpisode: [payload: { episodeUrl: string; progress: PlaybackProgress }];
   engineFallback: [reason: string];
 }>();
@@ -70,6 +72,7 @@ function handleArtPlayerFailure(reason: string) {
       v-if="usesNativeEngine"
       :session="props.session"
       :default-speed="props.defaultSpeed"
+      :compatibility-fallback-mode="props.compatibilityFallbackMode"
       :episodes="props.episodes"
       :current-episode-url="props.currentEpisodeUrl"
       :has-previous="props.hasPrevious"
@@ -78,6 +81,7 @@ function handleArtPlayerFailure(reason: string) {
       @previous="emit('previous', $event)"
       @next="emit('next', $event)"
       @ended="emit('ended', $event)"
+      @failure="emit('compatibilityFailure', $event)"
       @select-episode="emit('selectEpisode', $event)"
       @close="emit('close', $event)"
     />

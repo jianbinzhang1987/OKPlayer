@@ -18,6 +18,7 @@ export interface PlaybackEngineSelectionInput {
 const COMPATIBILITY_FIRST_FORMATS = new Set<PlaybackMediaFormat>([
   "dash",
   "flv",
+  "mkv",
   "mpeg-ts",
   "unknown",
 ]);
@@ -47,10 +48,17 @@ export function selectPlaybackEngine(input: PlaybackEngineSelectionInput): Playb
   const webCandidate = isWebPlaybackCandidate(input.format, input.sourceUrl);
   if (playbackMode === "standard") return webCandidate ? "web" : "mpv";
 
+  if (isPanOriginalLine(input)) return "mpv";
   if (!webCandidate) return "mpv";
   if (COMPATIBILITY_FIRST_FORMATS.has(input.format)) return "mpv";
   if (COMPATIBILITY_FIRST_EXTENSIONS.has(extensionOf(input.sourceUrl))) return "mpv";
   return "web";
+}
+
+function isPanOriginalLine(input: Pick<PlaybackEngineSelectionInput, "siteKey" | "flag">): boolean {
+  const context = `${input.siteKey ?? ""} ${input.flag ?? ""}`;
+  return /原画/i.test(context)
+    && /夸克|quark|(?:^|\W)uc(?:\W|$)|百度|baidu|(?:^|\D)115(?:\D|$)|pan115|天翼|pan189|移动云盘|pan139/i.test(context);
 }
 
 function extensionOf(value: string): string {

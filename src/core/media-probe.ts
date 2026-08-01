@@ -205,8 +205,10 @@ function detectMediaFormat(prefix: Uint8Array, mimeType: string, url: string): s
   if (/mpegurl|x-mpegurl/i.test(mimeType) || text.startsWith("#EXTM3U")) return "hls";
   if (/dash\+xml/i.test(mimeType) || /<(?:[\w-]+:)?MPD(?:\s|>)/i.test(text)) return "dash";
   if (/video\/mp4/i.test(mimeType) || extension === "mp4" || ascii(prefix, 4, 4) === "ftyp") return "mp4";
+  if (/video\/(?:x-)?matroska/i.test(mimeType) || extension === "mkv") return "mkv";
   if (/video\/(?:x-)?flv/i.test(mimeType) || extension === "flv" || ascii(prefix, 0, 3) === "FLV") return "flv";
-  if (/video\/webm/i.test(mimeType) || extension === "webm" || hasBytes(prefix, [0x1a, 0x45, 0xdf, 0xa3])) return "webm";
+  if (/video\/webm/i.test(mimeType) || extension === "webm") return "webm";
+  if (hasBytes(prefix, [0x1a, 0x45, 0xdf, 0xa3])) return "mkv";
   if (/video\/mp2t/i.test(mimeType) || extension === "ts" || prefix[0] === 0x47) return "mpeg-ts";
   if (mimeType.startsWith("video/")) return extension || "video";
   if (mimeType.startsWith("audio/")) return "audio";
@@ -234,6 +236,7 @@ function normalizeMediaFormat(value?: string): string | undefined {
   if (normalized.includes("mpegurl") || normalized.includes("m3u8") || normalized === "hls") return "hls";
   if (normalized.includes("mp4")) return "mp4";
   if (normalized.includes("dash") || normalized.includes("mpd")) return "dash";
+  if (normalized.includes("matroska") || normalized.includes("mkv")) return "mkv";
   if (normalized.includes("flv")) return "flv";
   if (normalized.includes("webm")) return "webm";
   if (normalized.includes("mpeg-ts") || normalized.includes("mpeg2")) return "mpeg-ts";
@@ -244,7 +247,7 @@ function normalizeMediaFormat(value?: string): string | undefined {
 
 function formatsCompatible(expected: string, actual: string): boolean {
   if (expected === actual) return true;
-  if (expected === "video" && ["mp4", "flv", "webm", "mpeg-ts", "video"].includes(actual)) return true;
+  if (expected === "video" && ["mp4", "mkv", "flv", "webm", "mpeg-ts", "video"].includes(actual)) return true;
   if (expected === "audio" && actual === "audio") return true;
   return false;
 }

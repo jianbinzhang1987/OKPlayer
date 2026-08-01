@@ -42,6 +42,24 @@ test("embedded and compatibility playback both support automatic next episode", 
   assert.ok(app.includes('@ended="handleEmbeddedEnded"'));
 });
 
+test("compatibility playback loads media before attaching the native surface and can fall back to a stable line", async () => {
+  const [app, nativePlayer] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(nativePlayerPath, "utf8"),
+  ]);
+  const loadIndex = nativePlayer.indexOf("fallbackPlayback(props.session.sessionId)");
+  const attachIndex = nativePlayer.indexOf("await attachNativeSurface()", loadIndex);
+  assert.ok(loadIndex >= 0 && attachIndex > loadIndex, "native media must load before the surface is attached");
+  for (const marker of [
+    "STARTUP_TIMEOUT_MS",
+    "reportCompatibilityFailure",
+    'emit("failure", { progress: snapshot(), reason })',
+  ]) assert.ok(nativePlayer.includes(marker), `missing compatibility failure marker: ${marker}`);
+  assert.ok(app.includes("handleCompatibilityPlaybackFailure"));
+  assert.ok(app.includes('resolveFallbackPlaybackLine(item?.flags, current.flag, currentEpisode, [current.flag], "stable")'));
+  assert.ok(app.includes('@compatibility-failure="handleCompatibilityPlaybackFailure"'));
+});
+
 test("external player fallback is disabled and playback stays inside the app", async () => {
   const [app, nativePlayer, preload, ipc] = await Promise.all([
     readFile(appPath, "utf8"),

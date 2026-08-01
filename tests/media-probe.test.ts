@@ -39,6 +39,12 @@ function route(request: IncomingMessage, response: ServerResponse): void {
     response.end(Buffer.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]));
     return;
   }
+  if (url.pathname === "/video.mkv") {
+    response.statusCode = 206;
+    response.setHeader("content-type", "video/x-matroska");
+    response.end(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81]));
+    return;
+  }
   if (url.pathname === "/fake.m3u8") {
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end("<!doctype html><html><body>Access denied</body></html>");
@@ -54,7 +60,7 @@ function route(request: IncomingMessage, response: ServerResponse): void {
   response.end("not found");
 }
 
-test("media probe validates HLS DASH and MP4 signatures", async () => {
+test("media probe validates HLS DASH MP4 and Matroska signatures", async () => {
   await withServer(async (origin) => {
     const hls = await probeMediaUrl(`${origin}/master.m3u8`, { expectedFormat: "hls" });
     assert.equal(hls.ok, true);
@@ -68,6 +74,10 @@ test("media probe validates HLS DASH and MP4 signatures", async () => {
     const mp4 = await probeMediaUrl(`${origin}/video.mp4`, { expectedFormat: "mp4" });
     assert.equal(mp4.ok, true);
     assert.equal(mp4.format, "mp4");
+
+    const mkv = await probeMediaUrl(`${origin}/video.mkv`, { expectedFormat: "mkv" });
+    assert.equal(mkv.ok, true);
+    assert.equal(mkv.format, "mkv");
   });
 });
 

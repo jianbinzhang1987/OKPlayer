@@ -56,7 +56,7 @@ test("playback sessions can be counted by CatVod site prefix", () => {
 test("playback format selection is conservative", () => {
   assert.equal(normalizePlaybackFormat(undefined, "https://cdn.example.com/a.m3u8?token=1"), "hls");
   assert.equal(normalizePlaybackFormat("mp4", "https://cdn.example.com/no-extension"), "mp4");
-  assert.equal(normalizePlaybackFormat(undefined, "https://cdn.example.com/a.mkv"), "unknown");
+  assert.equal(normalizePlaybackFormat(undefined, "https://cdn.example.com/a.mkv"), "mkv");
   assert.equal(isWebPlaybackCandidate("hls", "https://cdn.example.com/a.m3u8"), true);
   assert.equal(isWebPlaybackCandidate("flv", "https://cdn.example.com/a.flv"), false);
   assert.equal(isWebPlaybackCandidate("mp4", "/tmp/a.mp4"), false);

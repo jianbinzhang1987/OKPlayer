@@ -1,17 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import AppIcon from "./AppIcon.vue";
-import type { EmbeddedPlaybackSession, PlaybackProgress, PlayerEpisode } from "../player/player-types.ts";
+import type { CompatibilityFallbackMode } from "../player/playback-error-policy.ts";
+import type {
+  CompatibilityPlaybackFailure,
+  EmbeddedPlaybackSession,
+  PlaybackProgress,
+  PlayerEpisode,
+} from "../player/player-types.ts";
 
 const props = withDefaults(defineProps<{
   session: EmbeddedPlaybackSession;
   defaultSpeed?: number;
+  compatibilityFallbackMode?: CompatibilityFallbackMode;
   episodes?: PlayerEpisode[];
   currentEpisodeUrl?: string;
   hasPrevious?: boolean;
   hasNext?: boolean;
 }>(), {
   defaultSpeed: 1,
+  compatibilityFallbackMode: "automatic",
   episodes: () => [],
   currentEpisodeUrl: "",
   hasPrevious: false,
@@ -24,6 +32,7 @@ const emit = defineEmits<{
   previous: [progress: PlaybackProgress];
   next: [progress: PlaybackProgress];
   ended: [progress: PlaybackProgress];
+  failure: [payload: CompatibilityPlaybackFailure];
   selectEpisode: [payload: { episodeUrl: string; progress: PlaybackProgress }];
 }>();
 
@@ -49,6 +58,11 @@ let started = false;
 let disposed = false;
 let lastProgressAt = 0;
 let stopRequested = false;
+let playbackConfirmed = false;
+let failureReported = false;
+let startupWatchdog: ReturnType<typeof setTimeout> | undefined;
+
+const STARTUP_TIMEOUT_MS = 15_000;
 
 const progressPercent = computed(() => duration.value > 0 ? Math.min(100, Math.max(0, (position.value / duration.value) * 100)) : 0);
 const statusText = computed(() => {
@@ -93,12 +107,11 @@ function nativeSurfaceRect() {
 async function attachNativeSurface() {
   await nextTick();
   const rect = nativeSurfaceRect();
-  if (!rect || typeof window.tvApi.attachNativePlayerView !== "function") {
-    nativeSurfaceAttached.value = false;
-    return;
-  }
+  if (!rect) throw new Error("播放器画面区域尚未准备完成");
+  if (typeof window.tvApi.attachNativePlayerView !== "function") throw new Error("当前版本不支持应用内原生视频视图");
   const response = await window.tvApi.attachNativePlayerView(rect);
   nativeSurfaceAttached.value = response?.ok === true && response?.backend === "native-libmpv";
+  if (!nativeSurfaceAttached.value) throw new Error(response?.message || "原生视频视图挂载失败");
 }
 
 async function resizeNativeSurface() {
@@ -112,6 +125,31 @@ async function detachNativeSurface() {
   await window.tvApi.detachNativePlayerView?.().catch(() => undefined);
 }
 
+function clearStartupWatchdog() {
+  if (!startupWatchdog) return;
+  clearTimeout(startupWatchdog);
+  startupWatchdog = undefined;
+}
+
+function reportCompatibilityFailure(reason: string) {
+  clearStartupWatchdog();
+  stopRequested = true;
+  void window.tvApi.stop?.().catch(() => undefined);
+  status.value = "error";
+  errorMessage.value = reason;
+  if (failureReported || props.compatibilityFallbackMode !== "automatic") return;
+  failureReported = true;
+  emit("failure", { progress: snapshot(), reason });
+}
+
+function armStartupWatchdog() {
+  clearStartupWatchdog();
+  startupWatchdog = setTimeout(() => {
+    if (disposed || stopRequested || playbackConfirmed) return;
+    reportCompatibilityFailure("高兼容播放内核在 15 秒内未读取到有效媒体数据，正在尝试备用线路。");
+  }, STARTUP_TIMEOUT_MS);
+}
+
 function formatTime(value: number) {
   if (!Number.isFinite(value) || value <= 0) return "00:00";
   const total = Math.floor(value);
@@ -123,30 +161,32 @@ function formatTime(value: number) {
 }
 
 async function startNativePlayback() {
+  clearStartupWatchdog();
   stopRequested = false;
   status.value = "loading";
   errorMessage.value = "";
-  externalOpening.value = false;
   started = false;
+  playbackConfirmed = false;
+  failureReported = false;
   position.value = Math.max(0, props.session.startPosition ?? 0);
   duration.value = 0;
   try {
-    await attachNativeSurface();
     const playbackResult = await window.tvApi.fallbackPlayback(props.session.sessionId) as { backend?: string };
     if (playbackResult?.backend && playbackResult.backend !== "native-libmpv") {
-      nativeSurfaceAttached.value = false;
+      throw new Error("高兼容播放后端未进入应用内 libmpv 模式");
     }
+    await attachNativeSurface();
     await window.tvApi.setSpeed?.(speed.value);
     if (position.value > 0) await window.tvApi.seek(position.value);
-    status.value = "playing";
+    armStartupWatchdog();
   } catch (error) {
-    status.value = "error";
-    errorMessage.value = friendlyPlaybackError(error);
+    reportCompatibilityFailure(friendlyPlaybackError(error));
   }
 }
 
 async function stopNativePlayback() {
   stopRequested = true;
+  clearStartupWatchdog();
   await window.tvApi.stop?.().catch(() => undefined);
 }
 
@@ -233,20 +273,30 @@ function handlePlayerState(state: { position?: number; duration?: number; paused
   if (Number.isFinite(state.duration)) duration.value = Math.max(0, Number(state.duration));
   if (Number.isFinite(state.volume)) volume.value = Math.max(0, Math.min(100, Number(state.volume)));
   if (typeof state.muted === "boolean") muted.value = state.muted;
-  if (state.stopped !== true) {
-    started = true;
-    status.value = state.paused ? "paused" : "playing";
-    if (Date.now() - lastProgressAt >= 15_000) {
-      lastProgressAt = Date.now();
-      emit("progress", snapshot());
+  if (state.stopped === true) {
+    if (!started) return;
+    if (!playbackConfirmed && position.value <= 0 && duration.value <= 0) {
+      reportCompatibilityFailure("高兼容播放内核未能打开当前媒体，正在尝试备用线路。");
+      return;
     }
+    clearStartupWatchdog();
+    status.value = "ended";
+    const progress = snapshot();
+    emit("progress", progress);
+    emit("ended", progress);
     return;
   }
-  if (!started) return;
-  status.value = "ended";
-  const progress = snapshot();
-  emit("progress", progress);
-  emit("ended", progress);
+
+  started = true;
+  if (!playbackConfirmed && (position.value > 0 || duration.value > 0)) {
+    playbackConfirmed = true;
+    clearStartupWatchdog();
+  }
+  status.value = playbackConfirmed ? (state.paused ? "paused" : "playing") : "loading";
+  if (playbackConfirmed && Date.now() - lastProgressAt >= 15_000) {
+    lastProgressAt = Date.now();
+    emit("progress", snapshot());
+  }
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -325,6 +375,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  clearStartupWatchdog();
   window.removeEventListener("keydown", handleKeydown);
   removePlayerState?.();
   nativeSurfaceObserver?.disconnect();

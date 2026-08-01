@@ -95,7 +95,7 @@ test("external playback is allowed only for sessions without protected headers",
   await assert.rejects(() => service.openExternal(protectedSession.id, "iina"), /不能安全传递/);
 });
 
-test("web-compatible protected Quark media stays in the application window first", () => {
+test("pan speed media stays web-compatible while original quality prefers compatibility playback", () => {
   assert.equal(selectPlaybackEngine(
     "mp4",
     "https://video-play-c-zb.pds.quark.cn/movie",
@@ -107,12 +107,24 @@ test("web-compatible protected Quark media stays in the application window first
     "https://video-play-c-zb.pds.quark.cn/movie.m3u8",
     { Cookie: "redacted", "User-Agent": "FongMi" },
     { siteKey: "catvod:quark", flag: "夸克原画" },
-  ), "web");
+  ), "mpv");
   assert.equal(selectPlaybackEngine(
     "mp4",
     "https://cdn.example.com/movie.mp4",
     {},
     { siteKey: "normal", flag: "直连" },
+  ), "web");
+  assert.equal(selectPlaybackEngine(
+    "mp4",
+    "https://bdd0.baidupcs.com/file/opaque-token",
+    { "User-Agent": "AndroidXMedia/1.5.1" },
+    { siteKey: "catvod:nodejs_duoduo", flag: "百度原画" },
+  ), "mpv");
+  assert.equal(selectPlaybackEngine(
+    "mp4",
+    "https://video-play-c-zb.pds.quark.cn/movie",
+    { Cookie: "redacted" },
+    { siteKey: "catvod:nodejs_duoduo", flag: "夸克原画", playbackMode: "standard" },
   ), "web");
 });
 
@@ -122,6 +134,76 @@ test("protected extensionless media is probed before engine routing", async () =
   assert.equal(prepared.format, "mp4");
   assert.equal(prepared.engine, "web");
   assert.match(prepared.playbackUrl, /^fongmi-media:\/\/session\//);
+});
+
+test("local Quark original proxy is unwrapped and routed to Matroska compatibility playback", async () => {
+  const upstreamUrl = "https://dl-pc-zb.drive.quark.cn/file/opaque-token";
+  const upstreamHeaders = {
+    "User-Agent": "quark-cloud-drive/2.5.20",
+    Cookie: "session=redacted",
+    Referer: "https://pan.quark.cn/",
+  };
+  const payload = Buffer.from(JSON.stringify({ url: upstreamUrl, headers: upstreamHeaders })).toString("base64url");
+  const proxyUrl = `http://127.0.0.1:54669/spider/demo/3/proxy/quark/session-id?pst=${payload}`;
+  const probes: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const source = {
+    resolve: async () => ({ url: proxyUrl, headers: {}, resolvedBy: "direct" as const }),
+    playerResult: async () => ({ key: "s", flag: "夸克原画", url: proxyUrl, parse: 0, playUrl: "", header: {} }),
+    getConfig: () => ({ ads: [] }),
+  };
+  const fallback = { open: async () => undefined, stop: async () => undefined };
+  const sniffer = { sniff: async () => ({ url: upstreamUrl, headers: upstreamHeaders, format: "mkv", resolvedBy: "direct" as const }), cancel: () => undefined };
+  const sessions = new PlaybackSessionStore();
+  const probe = async (url: string, options?: { headers?: Record<string, string> }) => {
+    probes.push({ url, headers: options?.headers });
+    return { ok: true, url, statusCode: 206, mimeType: "video/x-matroska", bytesRead: 64 * 1024, format: "mkv", reason: "媒体内容验证通过" };
+  };
+  const service = new DesktopPlaybackService(source, fallback, sniffer, sessions, probe);
+
+  const prepared = await service.prepare({ siteKey: "catvod:demo", flag: "夸克原画", episodeUrl: "episode-1" });
+  const session = sessions.get(prepared.sessionId);
+  assert.equal(probes[0]?.url, upstreamUrl);
+  assert.deepEqual(probes[0]?.headers, upstreamHeaders);
+  assert.equal(session.sourceUrl, upstreamUrl);
+  assert.deepEqual(session.headers, upstreamHeaders);
+  assert.equal(prepared.format, "mkv");
+  assert.equal(prepared.engine, "mpv");
+});
+
+test("local Baidu original proxy is unwrapped inside the main-process playback session", async () => {
+  const upstreamUrl = "https://bdd0.baidupcs.com/file/opaque-token";
+  const payload = Buffer.from(JSON.stringify({
+    url: upstreamUrl,
+    headers: {
+      "User-Agent": "AndroidXMedia/1.5.1",
+      Connection: "keep-alive",
+      Injected: "unsafe\r\nheader",
+    },
+  })).toString("base64url");
+  const proxyUrl = `http://127.0.0.1:54669/spider/demo/3/proxy/baidu/session-id?pst=${payload}`;
+  const probes: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const source = {
+    resolve: async () => ({ url: proxyUrl, headers: {}, resolvedBy: "direct" as const }),
+    playerResult: async () => ({ key: "s", flag: "百度原画", url: proxyUrl, parse: 0, playUrl: "", header: {} }),
+    getConfig: () => ({ ads: [] }),
+  };
+  const fallback = { open: async () => undefined, stop: async () => undefined };
+  const sniffer = { sniff: async () => ({ url: upstreamUrl, headers: {}, format: "mp4", resolvedBy: "direct" as const }), cancel: () => undefined };
+  const sessions = new PlaybackSessionStore();
+  const probe = async (url: string, options?: { headers?: Record<string, string> }) => {
+    probes.push({ url, headers: options?.headers });
+    return { ok: true, url, statusCode: 206, mimeType: "video/mp4", bytesRead: 64 * 1024, format: "mp4", reason: "媒体内容验证通过" };
+  };
+  const service = new DesktopPlaybackService(source, fallback, sniffer, sessions, probe);
+
+  const prepared = await service.prepare({ siteKey: "catvod:nodejs_demo", flag: "百度原画", episodeUrl: "episode-1" });
+  const session = sessions.get(prepared.sessionId);
+  assert.equal(probes[0]?.url, upstreamUrl);
+  assert.deepEqual(probes[0]?.headers, { "User-Agent": "AndroidXMedia/1.5.1" });
+  assert.equal(session.sourceUrl, upstreamUrl);
+  assert.deepEqual(session.headers, { "User-Agent": "AndroidXMedia/1.5.1" });
+  assert.equal(prepared.format, "mp4");
+  assert.equal(prepared.engine, "mpv");
 });
 
 test("protected pan media reports expired authentication without degrading the source", async () => {
