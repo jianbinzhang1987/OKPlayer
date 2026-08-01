@@ -13,6 +13,7 @@ import {
   PlaybackSessionStore,
   type PlaybackMediaFormat,
   type PlaybackResourceKind,
+  type PlaybackSession,
 } from "./media-protocol/playback-session-store.ts";
 import {
   normalizePlaybackMode,
@@ -55,6 +56,9 @@ interface PlaybackSniffer {
 }
 
 type PlaybackMediaProbe = typeof probeMediaUrl;
+type NativePlaybackTarget = { url: string; headers?: Record<string, string> };
+type NativePlaybackTargetResolver = (session: PlaybackSession) => NativePlaybackTarget;
+type WebPlaybackUrlResolver = (session: PlaybackSession) => string;
 
 const PREPARATION_TIMEOUT_MS = 15_000;
 
@@ -71,6 +75,8 @@ export class DesktopPlaybackService {
   private readonly sessions: PlaybackSessionStore;
   private readonly probe: PlaybackMediaProbe;
   private readonly externalPlayer: ExternalPlayerLauncher;
+  private readonly nativePlaybackTarget: NativePlaybackTargetResolver;
+  private readonly webPlaybackUrl: WebPlaybackUrlResolver | undefined;
   private preparationController?: AbortController;
 
   constructor(
@@ -80,6 +86,8 @@ export class DesktopPlaybackService {
     sessions: PlaybackSessionStore,
     probe: PlaybackMediaProbe = probeMediaUrl,
     externalPlayer: ExternalPlayerLauncher = new ExternalPlayerService(),
+    nativePlaybackTarget: NativePlaybackTargetResolver = (session) => ({ url: session.sourceUrl, headers: session.headers }),
+    webPlaybackUrl?: WebPlaybackUrlResolver,
   ) {
     this.source = source;
     this.fallbackPlayer = fallbackPlayer;
@@ -87,6 +95,8 @@ export class DesktopPlaybackService {
     this.sessions = sessions;
     this.probe = probe;
     this.externalPlayer = externalPlayer;
+    this.nativePlaybackTarget = nativePlaybackTarget;
+    this.webPlaybackUrl = webPlaybackUrl;
   }
 
   static fromAppServices(
@@ -94,8 +104,10 @@ export class DesktopPlaybackService {
     fallbackPlayer: PlayerService,
     sniffer: BrowserSnifferService,
     sessions: PlaybackSessionStore,
+    nativePlaybackTarget?: NativePlaybackTargetResolver,
+    webPlaybackUrl?: WebPlaybackUrlResolver,
   ): DesktopPlaybackService {
-    return new DesktopPlaybackService(source, fallbackPlayer, sniffer, sessions);
+    return new DesktopPlaybackService(source, fallbackPlayer, sniffer, sessions, undefined, undefined, nativePlaybackTarget, webPlaybackUrl);
   }
 
   async prepare(input: PreparePlaybackInput): Promise<PreparedPlayback> {
@@ -122,7 +134,9 @@ export class DesktopPlaybackService {
       await this.source.recordPlaybackSuccess?.(input.siteKey, Date.now() - startedAt).catch(() => undefined);
       return {
         sessionId: session.id,
-        playbackUrl: this.sessions.playbackUrl(session.id),
+        playbackUrl: this.webPlaybackUrl
+          ? this.webPlaybackUrl(session)
+          : this.sessions.playbackUrl(session.id),
         format: session.format,
         engine,
         resolvedBy: session.resolvedBy,
@@ -153,7 +167,8 @@ export class DesktopPlaybackService {
   async fallback(sessionId: string): Promise<{ status: "started"; backend: string }> {
     const session = this.sessions.get(sessionId);
     try {
-      await this.fallbackPlayer.open(session.sourceUrl, session.headers);
+      const target = this.nativePlaybackTarget(session);
+      await this.fallbackPlayer.open(target.url, target.headers);
       return { status: "started", backend: this.fallbackPlayer.getBackend?.() ?? "mpv-ipc" };
     } catch (error) {
       throw new PlaybackFailure(
@@ -202,12 +217,50 @@ export class DesktopPlaybackService {
 
   private async resolveMedia(input: PreparePlaybackInput, signal: AbortSignal): Promise<ResolvedMedia> {
     try {
-      const resolved = unwrapLocalPanProxyMedia(
-        await this.source.resolve(input.siteKey, input.flag, input.episodeUrl, signal),
-      );
+      const sourceMedia = await this.source.resolve(input.siteKey, input.flag, input.episodeUrl, signal);
+      const resolvedFromLocalPanProxy = isLocalPanProxyUrl(sourceMedia.url);
+      const resolvedFromBaiduProxy = isBaiduPanProxyUrl(sourceMedia.url);
+      const resolved = unwrapLocalPanProxyMedia(sourceMedia);
       const likelyPlaybackPage = isLikelyPlaybackPage(resolved.url);
       const explicitDirectMedia = isLikelyDirectMediaUrl(resolved.url);
+      // A CatVod pan proxy has already created this short-lived URL together
+      // with the exact provider headers. A separate 64 KiB preflight uses a
+      // different request lifecycle and Quark may answer it with 412, so the
+      // probe on a pan proxy is ADVISORY: a 206 tells us the container (MKV →
+      // mpv directly, no 10s web wait), while any failure leaves the format
+      // unknown and the renderer watchdog routes it (web first, then mpv).
       if (!likelyPlaybackPage && shouldProbeResolvedMedia(resolved, explicitDirectMedia)) {
+        if (resolvedFromLocalPanProxy) {
+          // A pan proxy lease is trusted and short-lived. The probe is purely
+          // advisory: a 206 tells us the container (MKV → mpv directly, no
+          // 10s web wait). ANY probe failure — including an aborted/timed-out
+          // request that THROWS from probeMediaUrl — must not flip the line.
+          // Playback routing is provider-aware below: Quark/UC retain the
+          // optimized proxy, while Baidu avoids its incompatible parallel
+          // range behavior.
+          let probe: MediaProbeResult | undefined;
+          try {
+            probe = await this.probe(resolved.url, {
+              headers: resolved.headers,
+              ...(resolved.format ? { expectedFormat: resolved.format } : {}),
+              timeoutMs: 4_000,
+              signal,
+            });
+          } catch {
+            probe = undefined;
+          }
+          // Baidu's CDN serves byte ranges reliably and quickly when the
+          // signed URL is requested with its original User-Agent. CatVod's
+          // 16-way smart proxy, however, is frequently throttled by Baidu:
+          // parallel chunks time out and libmpv never receives enough of the
+          // MP4 header to start. Keep the optimized proxy for Quark/UC, but
+          // let our credential-preserving media gateway fetch Baidu directly.
+          const playbackMedia = resolvedFromBaiduProxy ? resolved : sourceMedia;
+          return {
+            ...playbackMedia,
+            ...(probe?.ok && probe.format ? { format: probe.format } : {}),
+          };
+        }
         const probe = await this.probe(resolved.url, {
           headers: resolved.headers,
           ...(resolved.format ? { expectedFormat: resolved.format } : {}),
@@ -226,6 +279,18 @@ export class DesktopPlaybackService {
             "AUTH_EXPIRED",
             `网盘凭据校验失败：HTTP ${probe.statusCode}`,
             { userMessage: "网盘登录已失效，请重新登录后继续播放。" },
+          );
+        }
+        if (probe.statusCode === 412 && isPanPlaybackInput(input)) {
+          // Netdisk signed links are short-lived; a 412 usually means the
+          // link expired between resolution and the first real Range request,
+          // not that the line is dead. Report it as a retryable link expiry
+          // (renderer re-fetches a fresh link for the same line) instead of
+          // switching lines.
+          throw new PlaybackFailure(
+            "MEDIA_URL_EXPIRED",
+            `网盘原画链接已失效：HTTP ${probe.statusCode}`,
+            { userMessage: "网盘原画链接已失效，正在重新获取播放地址。", sourceImpact: "none" },
           );
         }
         if (explicitDirectMedia && isDefinitiveDirectProbeFailure(probe)) throw new DirectMediaUnavailableError(probe.reason);
@@ -336,7 +401,20 @@ function isLocalPanProxyUrl(value: string): boolean {
   try {
     const url = new URL(value);
     const local = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
-    return local && /\/proxy\/(?:quark|baidu|uc|pan115|pan189|pan139)(?:\/|$)/i.test(url.pathname);
+    const panProxyPath = /\/proxy\/(?:quark|baidu|uc|pan115|pan189|pan139)(?:\/|$)/i.test(url.pathname);
+    // A CatVod player response can preserve the proxy's original host before
+    // it is rebound to the active local service.  `pst` is CatVod's opaque
+    // per-playback session payload, so it is a stronger identity signal than
+    // the host alone and lets us unwrap that valid response before probing.
+    return panProxyPath && (local || Boolean(url.searchParams.get("pst")?.trim()));
+  } catch {
+    return false;
+  }
+}
+
+function isBaiduPanProxyUrl(value: string): boolean {
+  try {
+    return /\/proxy\/baidu(?:\/|$)/i.test(new URL(value).pathname);
   } catch {
     return false;
   }
@@ -356,8 +434,7 @@ const PAN_PROXY_HEADER_ALLOWLIST = new Set([
 function unwrapLocalPanProxyMedia(media: ResolvedMedia): ResolvedMedia {
   try {
     const proxyUrl = new URL(media.url);
-    const local = proxyUrl.hostname === "127.0.0.1" || proxyUrl.hostname === "localhost" || proxyUrl.hostname === "::1";
-    if (!local || !/\/proxy\/(?:quark|baidu|uc|pan115|pan189|pan139)(?:\/|$)/i.test(proxyUrl.pathname)) return media;
+    if (!isLocalPanProxyUrl(media.url)) return media;
     const payload = proxyUrl.searchParams.get("pst")?.trim();
     if (!payload || payload.length > 64 * 1024) return media;
 

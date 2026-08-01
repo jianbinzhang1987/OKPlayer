@@ -36,6 +36,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   close: [progress: PlaybackProgress];
   fallback: [progress: PlaybackProgress];
+  reprepare: [progress: PlaybackProgress];
   progress: [progress: PlaybackProgress];
   previous: [progress: PlaybackProgress];
   next: [progress: PlaybackProgress];
@@ -123,6 +124,7 @@ function handleArtPlayerFailure(reason: string) {
       @select-episode="emit('selectEpisode', $event)"
       @close="emit('close', $event)"
       @fallback="emit('fallback', $event)"
+      @reprepare="emit('reprepare', $event)"
     />
   </div>
 </template>

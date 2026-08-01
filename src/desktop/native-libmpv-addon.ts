@@ -75,13 +75,17 @@ let cachedAvailability: NativeLibmpvAvailability | undefined;
 let cachedAddon: NativeLibmpvAddon | undefined;
 let cachedPreflight: Promise<NativeLibmpvAvailability> | undefined;
 
-export function hasPackagedNativeLibmpvRuntime(): boolean {
-  const platformName = platformResourceName();
-  const libraryNames = process.platform === "darwin"
+function libraryNamesForPlatform(platform = process.platform): string[] {
+  return platform === "darwin"
     ? ["libmpv.2.dylib", "libmpv.dylib"]
-    : process.platform === "win32"
+    : platform === "win32"
       ? ["mpv-2.dll", "libmpv-2.dll", "libmpv.dll"]
       : ["libmpv.so.2", "libmpv.so"];
+}
+
+export function hasPackagedNativeLibmpvRuntime(): boolean {
+  const platformName = platformResourceName();
+  const libraryNames = libraryNamesForPlatform();
   const roots = [...new Set([
     process.env.FONGMI_LIBMPV_RESOURCE_ROOT,
     process.resourcesPath,
@@ -96,12 +100,35 @@ export function hasPackagedNativeLibmpvRuntime(): boolean {
 
 export function isNativeLibmpvExplicitlyEnabled(): boolean {
   if (process.env.FONGMI_ENABLE_NATIVE_LIBMPV === "0") return false;
-  return process.env.FONGMI_ENABLE_NATIVE_LIBMPV === "1" || hasPackagedNativeLibmpvRuntime();
+  return process.env.FONGMI_ENABLE_NATIVE_LIBMPV === "1"
+    || hasPackagedNativeLibmpvRuntime()
+    || hasExplicitNativeLibmpvPaths()
+    || hasDevelopmentNativeLibmpvRuntime();
+}
+
+/**
+ * Development mode (`npm start` runs `electron dist/main/main.js`) does not
+ * use `process.resourcesPath`, so the packaged-runtime check above cannot
+ * find the in-repo staging locations. Detect them directly: the addon lives
+ * under `resources/native/libmpv-player/<platform>/` and the libmpv
+ * libraries under `build/native-runtime/libmpv/<platform>/`. Both must exist
+ * for in-app native playback to be available while developing. This only
+ * applies to unpackaged Electron runs (`electron <script>` sets
+ * process.defaultApp); packaged apps and node-based tests never hit it.
+ */
+export function hasDevelopmentNativeLibmpvRuntime(currentDirectory = path.dirname(fileURLToPath(import.meta.url))): boolean {
+  if (process.defaultApp !== true) return false;
+  const platformName = platformResourceName();
+  const addonPath = path.join(currentDirectory, "..", "..", "resources", "native", "libmpv-player", platformName, ADDON_FILENAME);
+  const libraryDirectory = path.join(currentDirectory, "..", "..", "build", "native-runtime", "libmpv", platformName);
+  return existsSync(addonPath) && libraryNamesForPlatform().some((name) => existsSync(path.join(libraryDirectory, name)));
 }
 
 export function isNativeLibmpvAutoDiscoveryEnabled(): boolean {
   if (process.env.FONGMI_ENABLE_NATIVE_LIBMPV_AUTO_DISCOVERY === "0") return false;
-  return process.env.FONGMI_ENABLE_NATIVE_LIBMPV_AUTO_DISCOVERY === "1" || hasPackagedNativeLibmpvRuntime();
+  return process.env.FONGMI_ENABLE_NATIVE_LIBMPV_AUTO_DISCOVERY === "1"
+    || hasPackagedNativeLibmpvRuntime()
+    || hasDevelopmentNativeLibmpvRuntime();
 }
 
 function isValidNativeAddonPath(addonPath: string | undefined): addonPath is string {
@@ -131,7 +158,10 @@ function nativeLibmpvManagedResourceRoots(currentDirectory = path.dirname(fileUR
   return [...new Set([
     process.env.FONGMI_LIBMPV_RESOURCE_ROOT,
     process.resourcesPath,
+    // Development layout: `resources/` holds the addon, `build/native-runtime/`
+    // holds the staged libmpv libraries (mirrors the packaged layout).
     path.join(currentDirectory, "..", "..", "resources"),
+    path.join(currentDirectory, "..", "..", "build", "native-runtime"),
   ].filter((item): item is string => Boolean(item)).map((item) => path.resolve(item)))];
 }
 

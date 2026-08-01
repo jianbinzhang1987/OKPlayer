@@ -20,7 +20,6 @@ const COMPATIBILITY_FIRST_FORMATS = new Set<PlaybackMediaFormat>([
   "flv",
   "mkv",
   "mpeg-ts",
-  "unknown",
 ]);
 
 const COMPATIBILITY_FIRST_EXTENSIONS = new Set([
@@ -48,7 +47,17 @@ export function selectPlaybackEngine(input: PlaybackEngineSelectionInput): Playb
   const webCandidate = isWebPlaybackCandidate(input.format, input.sourceUrl);
   if (playbackMode === "standard") return webCandidate ? "web" : "mpv";
 
-  if (isPanOriginalLine(input)) return "mpv";
+  // Netdisk "original" MP4s are frequently HEVC even though the container is
+  // browser-shaped. Electron/Chromium codec support varies by build and these
+  // files can consume tens of megabytes while remaining stuck before
+  // metadata. The managed libmpv runtime has the required demuxer/codecs and
+  // already receives the same opaque loopback URL, so prefer it in auto mode.
+  if (input.format === "mp4" && isPanOriginalLine(input)) return "mpv";
+
+  // Unknown formats are not guessed here: start with the Chromium web engine
+  // and let the renderer detect "format not supported" to fall back to the
+  // native mpv kernel on the same resolved session.
+  if (input.format === "unknown") return "web";
   if (!webCandidate) return "mpv";
   if (COMPATIBILITY_FIRST_FORMATS.has(input.format)) return "mpv";
   if (COMPATIBILITY_FIRST_EXTENSIONS.has(extensionOf(input.sourceUrl))) return "mpv";

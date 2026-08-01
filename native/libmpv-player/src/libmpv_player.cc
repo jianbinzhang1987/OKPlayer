@@ -47,6 +47,16 @@ void LibmpvPlayer::EnsureMpv() {
   ThrowMpvError(library, "设置 libmpv 视频输出", library.setOptionString(mpv_, "vo", "libmpv"));
   library.setOptionString(mpv_, "terminal", "no");
   library.setOptionString(mpv_, "hwdec", "auto-safe");
+  // Media plays through a double-hop local pipeline (loopback gateway →
+  // net.fetch → CatVod proxy → netdisk CDN) whose per-request latency is
+  // high. The default demuxer readahead is too small for high-bitrate 4K
+  // streams and stalls between Range round-trips, surfacing as constant
+  // buffering. Pre-read generously and hold a large cache so playback does
+  // not pause on every request.
+  library.setOptionString(mpv_, "demuxer-readahead-secs", "60");
+  library.setOptionString(mpv_, "demuxer-max-bytes", "512MiB");
+  library.setOptionString(mpv_, "cache", "yes");
+  library.setOptionString(mpv_, "cache-secs", "300");
   ThrowMpvError(library, "初始化 libmpv", library.initialize(mpv_));
   using_mpv_ = true;
 }

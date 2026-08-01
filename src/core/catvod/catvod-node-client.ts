@@ -36,6 +36,15 @@ export class CatVodNodeClient {
     return this.getObject("/config", signal);
   }
 
+  async setProxyMode(mode: "legacy" | "smart", signal?: AbortSignal): Promise<void> {
+    await this.request("/website/api/settings/proxy-mode", {
+      method: "PUT",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ mode }),
+      signal,
+    });
+  }
+
   async spider(
     apiPath: string,
     operation: "init" | "support" | "home" | "homeVod" | "category" | "detail" | "search" | "play",

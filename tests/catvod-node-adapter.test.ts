@@ -141,3 +141,24 @@ test("pan CatVod site supports folder browsing and playback without requiring a 
   assert.equal(adapter.capabilities.detail, true);
   assert.equal(adapter.capabilities.player, true);
 });
+
+test("CatVod client enables the concurrency-safe smart proxy mode", async () => {
+  let requestUrl = "";
+  let requestMethod = "";
+  let requestBody: unknown;
+  const client = new CatVodNodeClient({
+    baseUrl: () => "http://127.0.0.1:9988",
+    fetchImpl: async (input, init) => {
+      requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      requestMethod = String(init?.method ?? "GET");
+      requestBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json({ code: 0 });
+    },
+  });
+
+  await client.setProxyMode("smart");
+
+  assert.equal(requestUrl, "http://127.0.0.1:9988/website/api/settings/proxy-mode");
+  assert.equal(requestMethod, "PUT");
+  assert.deepEqual(requestBody, { mode: "smart" });
+});

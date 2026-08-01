@@ -20,6 +20,7 @@ import { CatVodProfileStore } from "./catvod-profile-store.ts";
 import { CatVodProtocolService } from "./catvod-protocol-service.ts";
 import { DesktopPlaybackService } from "./desktop-playback-service.ts";
 import { MediaProtocolService, MEDIA_PROTOCOL_SCHEME } from "./media-protocol/media-protocol-service.ts";
+import { LocalMediaGateway } from "./media-protocol/local-media-gateway.ts";
 import { PlaybackSessionStore } from "./media-protocol/playback-session-store.ts";
 import { preflightNativeLibmpvAddon } from "./native-libmpv-addon.ts";
 import { NativeFallbackPlaybackController, UnavailablePlaybackController } from "./native-fallback-playback-controller.ts";
@@ -34,6 +35,7 @@ let player: PlayerService | undefined;
 let sniffer: BrowserSnifferService | undefined;
 let playback: DesktopPlaybackService | undefined;
 let playbackSessions: PlaybackSessionStore | undefined;
+let localMediaGateway: LocalMediaGateway | undefined;
 let catVodProcess: CatVodProcessManager | undefined;
 let catVodClient: CatVodNodeClient | undefined;
 let catVodAccountService: CatVodAccountService | undefined;
@@ -71,6 +73,21 @@ export function createMainWindow() {
   }
   window = new BrowserWindow(windowOptions);
   window.once("ready-to-show", () => window?.show());
+  // Forward renderer console output to the main-process stdout so playback
+  // decisions (line fallback, engine switching) can be diagnosed from the
+  // same log stream that carries gateway and media-protocol diagnostics.
+  // Electron 43 emits either the legacy (level, message, ...) args or the
+  // newer (details) object form — handle both.
+  window.webContents.on("console-message", (...args) => {
+    const first = args[0];
+    let message = "";
+    if (typeof first === "object" && first !== null) {
+      message = String((first as { message?: unknown }).message ?? "");
+    } else {
+      message = String(args[2] ?? first ?? "");
+    }
+    if (/\[playback-|\[player-/.test(message)) console.log(`[renderer] ${message}`);
+  });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void window.loadURL(devUrl);
@@ -157,17 +174,44 @@ app.whenReady().then(async () => {
   player = new PlayerService(playbackController);
   sniffer = new BrowserSnifferService();
   playbackSessions = new PlaybackSessionStore();
-  new MediaProtocolService(
+  const mediaProtocol = new MediaProtocolService(
     playbackSessions,
     (input, init) => net.fetch(input, init),
     (url) => {
       const baseUrl = catVodProcess?.status().baseUrl;
       return baseUrl ? resolveCatVodRuntimeUrl(url, baseUrl) : url;
     },
-  ).register(protocol);
-  playback = DesktopPlaybackService.fromAppServices(service, player, sniffer, playbackSessions);
+  );
+  mediaProtocol.register(protocol);
+  localMediaGateway = new LocalMediaGateway(mediaProtocol, playbackSessions);
+  await localMediaGateway.start();
+  playback = DesktopPlaybackService.fromAppServices(service, player, sniffer, playbackSessions, (session) => {
+    // HLS/DASH manifests contain fongmi-media child URLs today.  Keep their
+    // existing path until the gateway owns manifest rewriting as well.
+    if (session.format === "hls" || session.format === "dash") return { url: session.sourceUrl, headers: session.headers };
+    return { url: localMediaGateway!.playbackUrl(session.id) };
+  }, (session) => {
+    // The web engine also consumes media through the loopback HTTP gateway.
+    // Chromium's media pipeline is only fully reliable for HTTP(S) sources;
+    // custom-protocol <video> srcs buffer and seek unpredictably with
+    // netdisk 4K streams. The gateway forwards through the same
+    // MediaProtocolService, so credentials and session headers stay in the
+    // main process either way. HLS child resources remain fongmi-media://
+    // URLs inside the rewritten manifest, which the registered protocol
+    // handler still serves.
+    return localMediaGateway!.playbackUrl(session.id);
+  });
   const syncCatVodSites = async () => {
     if (!service || !catVodClient || !catVodProcess) throw new Error("CatVod 服务尚未初始化");
+    // The legacy chunk proxy globally deletes every cache directory except
+    // the most recently requested media key. Closing or rapidly replacing a
+    // player can therefore remove .dl files that another in-flight Quark or
+    // Baidu request is still writing, poisoning every later pan playback with
+    // ENOENT errors. CatVod's smart proxy tracks active requests separately
+    // and is safe for player close/reopen and concurrent probe traffic.
+    await catVodClient.setProxyMode("smart").catch((error) => {
+      console.warn("CatVod optimized proxy mode could not be enabled", redactSensitiveError(error));
+    });
     const parsed = parseCatVodConfig(await catVodClient.config());
     await service.setDynamicSites(parsed.sites);
     catVodProcess.setSiteCount(parsed.summary.siteCount);
@@ -292,6 +336,8 @@ app.on("before-quit", () => {
   playback?.closeAll();
   playback = undefined;
   playbackSessions = undefined;
+  void localMediaGateway?.stop();
+  localMediaGateway = undefined;
   // Only unfinished QR login tasks are cancelled. Persisted Cookie/Token credentials remain in the encrypted Profile.
   void catVodAccountService?.cancelAll();
   catVodAccountService = undefined;

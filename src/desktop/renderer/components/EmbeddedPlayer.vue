@@ -17,6 +17,8 @@ import {
   type SubtitlePresentationSettings,
 } from "../player/presentation-settings.ts";
 
+const STARTUP_TIMEOUT_MS = 10_000;
+
 const props = withDefaults(defineProps<{
   session: EmbeddedPlaybackSession;
   defaultSpeed?: number;
@@ -43,6 +45,7 @@ type PlaybackSnapshot = PlaybackProgress;
 const emit = defineEmits<{
   close: [progress: PlaybackSnapshot];
   fallback: [progress: PlaybackSnapshot];
+  reprepare: [progress: PlaybackSnapshot];
   progress: [progress: PlaybackSnapshot];
   previous: [progress: PlaybackSnapshot];
   next: [progress: PlaybackSnapshot];
@@ -72,6 +75,10 @@ let networkRecoveries = 0;
 let mediaRecoveries = 0;
 let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
 let fallbackTriggered = false;
+let reprepareRequested = false;
+let networkErrorRetried = false;
+let startupWatchdog: ReturnType<typeof setTimeout> | undefined;
+let startupWatchdogExtensions = 0;
 let subtitleCueOrigins = new WeakMap<TextTrackCue, { start: number; end: number }>();
 
 const resolvedSubtitleSettings = computed(() => normalizeSubtitleSettings(props.subtitleSettings));
@@ -133,10 +140,45 @@ function disposeHls() {
   networkRecoveries = 0;
   mediaRecoveries = 0;
 }
-
 function clearFallbackTimer() {
   if (fallbackTimer) clearTimeout(fallbackTimer);
   fallbackTimer = undefined;
+}
+
+function clearStartupWatchdog() {
+  if (startupWatchdog) clearTimeout(startupWatchdog);
+  startupWatchdog = undefined;
+}
+
+function armStartupWatchdog() {
+  clearStartupWatchdog();
+  startupWatchdog = setTimeout(() => {
+    startupWatchdog = undefined;
+    if (disposed || status.value !== "loading" || fallbackTriggered) return;
+    const element = video.value;
+    // If the element is genuinely receiving data (buffered ranges exist) it
+    // is a slow-but-healthy start (e.g. a high-bitrate MP4 through the local
+    // gateway), not a container Chromium cannot parse. Extend the wait a
+    // couple of times before falling back, so a slow start never triggers a
+    // full re-fetch. A container Chromium cannot parse never fills buffered
+    // ranges, so it still falls through to the mpv kernel here.
+    const hasBufferedData = element ? element.buffered.length > 0 : false;
+    if (hasBufferedData && startupWatchdogExtensions < 2) {
+      startupWatchdogExtensions += 1;
+      armStartupWatchdog();
+      return;
+    }
+    // The media request can hang without ever raising a media error event.
+    //  - A container Chromium cannot parse (netdisk 原画 links are often
+    //    Matroska): re-fetching the link cannot help — switch to the native
+    //    mpv kernel on the SAME session.
+    //  - A stale short-lived signed link: re-fetching helps (handled by the
+    //    explicit network-error handler).
+    // The mpv side has its own watchdog, so if mpv also fails the playback
+    // falls through to line switching as usual.
+    fallbackTriggered = true;
+    emit("fallback", snapshot());
+  }, STARTUP_TIMEOUT_MS);
 }
 
 function scheduleAutomaticFallback() {
@@ -160,6 +202,37 @@ function showPlaybackError(message: string) {
   controlsVisible.value = true;
   clearControlsTimer();
   scheduleAutomaticFallback();
+}
+
+/**
+ * Network-level media failures (link expired, CDN rejected the request) are
+ * recovered by re-fetching a fresh link for the SAME line instead of falling
+ * back to the mpv kernel or switching lines. Only one reprepare is requested
+ * per session to avoid ping-ponging between stale links.
+ */
+function requestSameLineReprepare() {
+  if (reprepareRequested || disposed) return;
+  clearFallbackTimer();
+  reprepareRequested = true;
+  emit("reprepare", snapshot());
+}
+
+function showNetworkError(message: string) {
+  if (networkErrorRetried) {
+    requestSameLineReprepare();
+    return;
+  }
+  networkErrorRetried = true;
+  status.value = "error";
+  errorMessage.value = message;
+  controlsVisible.value = true;
+  clearControlsTimer();
+  // One in-session retry first; the same source URL may be transiently
+  // unreachable. If it fails again, the reprepare path takes over.
+  setTimeout(() => {
+    if (disposed || status.value !== "error" || reprepareRequested) return;
+    void loadMedia();
+  }, 900);
 }
 
 async function tryAutoPlay(element: HTMLVideoElement) {
@@ -210,7 +283,14 @@ async function loadWithHlsJs(element: HTMLVideoElement, generation: number) {
       }
       instance.destroy();
       if (hls === instance) hls = undefined;
-      showPlaybackError(`HLS 内置播放失败${data.details ? `：${data.details}` : ""}，可使用高兼容播放器继续播放。`);
+      // Network failures are usually a stale signed link (netdisk original
+      // quality), so re-fetch the link instead of switching engines. Media
+      // failures are a codec/container incompatibility — fall back to mpv.
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        showNetworkError(`HLS 分片请求失败${data.details ? `：${data.details}` : ""}，正在尝试重新获取播放地址。`);
+      } else {
+        showPlaybackError(`HLS 内置播放失败${data.details ? `：${data.details}` : ""}，可使用高兼容播放器继续播放。`);
+      }
     });
     instance.attachMedia(element);
   } catch (error) {
@@ -225,6 +305,7 @@ async function loadMedia() {
   if (!element || disposed) return;
   const generation = ++loadGeneration;
   clearFallbackTimer();
+  clearStartupWatchdog();
   fallbackTriggered = false;
   errorMessage.value = "";
   status.value = "loading";
@@ -249,6 +330,7 @@ async function loadMedia() {
 
   element.src = props.session.playbackUrl;
   element.load();
+  armStartupWatchdog();
   await tryAutoPlay(element);
 }
 
@@ -292,6 +374,7 @@ function onTimeUpdate() {
 }
 
 function onPlaying() {
+  clearStartupWatchdog();
   clearFallbackTimer();
   fallbackTriggered = false;
   status.value = "playing";
@@ -332,6 +415,12 @@ function selectEpisode(episodeUrl: string) {
 function onPlaybackError() {
   if (playbackEngine.value === "hls.js" && hls) return;
   const code = video.value?.error?.code;
+  if (code === 2) {
+    // MEDIA_ERR_NETWORK: the signed link likely expired between resolution
+    // and the first media request — re-fetch a fresh link for the same line.
+    showNetworkError("媒体网络请求失败，正在尝试重新获取播放地址。");
+    return;
+  }
   showPlaybackError(`媒体加载失败${code ? `（错误代码 ${code}）` : ""}，可使用高兼容播放器继续播放。`);
 }
 
@@ -417,6 +506,7 @@ onBeforeUnmount(() => {
   loadGeneration += 1;
   clearControlsTimer();
   clearFallbackTimer();
+  clearStartupWatchdog();
   disposeHls();
   window.removeEventListener("keydown", handleKeydown);
   const element = video.value;

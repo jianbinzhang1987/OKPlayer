@@ -45,6 +45,14 @@ function route(request: IncomingMessage, response: ServerResponse): void {
     response.end(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81]));
     return;
   }
+  if (url.pathname === "/video.mkv.raw") {
+    // Netdisk signed links often omit a meaningful content-type; the EBML
+    // magic must be enough to identify the Matroska container.
+    response.statusCode = 206;
+    response.setHeader("content-type", "application/octet-stream");
+    response.end(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81]));
+    return;
+  }
   if (url.pathname === "/fake.m3u8") {
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end("<!doctype html><html><body>Access denied</body></html>");
@@ -78,6 +86,12 @@ test("media probe validates HLS DASH MP4 and Matroska signatures", async () => {
     const mkv = await probeMediaUrl(`${origin}/video.mkv`, { expectedFormat: "mkv" });
     assert.equal(mkv.ok, true);
     assert.equal(mkv.format, "mkv");
+
+    // Netdisk signed links often lack a content-type; the EBML magic alone
+    // must identify Matroska so MKV routes straight to the mpv kernel.
+    const rawMkv = await probeMediaUrl(`${origin}/video.mkv.raw`);
+    assert.equal(rawMkv.ok, true);
+    assert.equal(rawMkv.format, "mkv");
   });
 });
 

@@ -4,6 +4,7 @@ import test from "node:test";
 
 const appPath = new URL("../src/desktop/renderer/App.vue", import.meta.url);
 const playerPath = new URL("../src/desktop/renderer/components/EmbeddedPlayer.vue", import.meta.url);
+const playerContainerPath = new URL("../src/desktop/renderer/components/PlayerContainer.vue", import.meta.url);
 const nativePlayerPath = new URL("../src/desktop/renderer/components/NativePlayerHost.vue", import.meta.url);
 const preloadPath = new URL("../src/desktop/preload.ts", import.meta.url);
 const ipcPath = new URL("../src/desktop/register-ipc.ts", import.meta.url);
@@ -56,7 +57,9 @@ test("compatibility playback loads media before attaching the native surface and
     'emit("failure", { progress: snapshot(), reason })',
   ]) assert.ok(nativePlayer.includes(marker), `missing compatibility failure marker: ${marker}`);
   assert.ok(app.includes("handleCompatibilityPlaybackFailure"));
-  assert.ok(app.includes('resolveFallbackPlaybackLine(item?.flags, current.flag, currentEpisode, [current.flag], "stable")'));
+  assert.ok(app.includes("const attemptedFlags = current.attemptedFlags ?? []"));
+  assert.ok(app.includes('resolveFallbackPlaybackLine(item?.flags, current.flag, currentEpisode, attemptedFlags, "stable")'));
+  assert.ok(app.includes("[...attemptedFlags, current.flag]"));
   assert.ok(app.includes('@compatibility-failure="handleCompatibilityPlaybackFailure"'));
 });
 
@@ -76,4 +79,51 @@ test("external player fallback is disabled and playback stays inside the app", a
   assert.ok(ipc.includes('PLAYBACK_EXTERNAL: "playback:external"'));
   assert.ok(ipc.includes("外部播放器已禁用"));
   assert.ok(!ipc.includes("playback.openExternal(sessionId, preference)"));
+});
+
+test("netdisk playback re-fetches a fresh link for the same line after link expiry", async () => {
+  const [app, player, container] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(playerPath, "utf8"),
+    readFile(playerContainerPath, "utf8"),
+  ]);
+  // Same-line re-fetch after link-expiry or a transient resolve timeout,
+  // before falling back to another line.
+  assert.ok(app.includes('const failureCode = (e as RendererPlaybackFailure)?.code;'));
+  assert.ok(app.includes('failureCode === "MEDIA_URL_EXPIRED" || failureCode === "SOURCE_RESOLVE_FAILED"'));
+  assert.ok(app.includes("sameLineRetries === 0"));
+  assert.ok(app.includes("attemptedSiteKeys, 1)"));
+  assert.ok(app.includes("sameLineRetries = 0,"));
+  assert.ok(app.includes("网盘播放地址已失效，正在重新获取后继续播放…"));
+  assert.ok(app.includes("播放地址解析超时，正在重试当前线路…"));
+  assert.ok(app.includes("handleWebPlayerReprepare"));
+  assert.ok(app.includes("播放地址可能已过期，正在重新获取后继续播放…"));
+  assert.ok(app.includes('@reprepare="handleWebPlayerReprepare"'));
+  // Web engine emits a reprepare request for network-level media failures.
+  assert.ok(player.includes("reprepare: [progress: PlaybackSnapshot]"));
+  assert.ok(player.includes('emit("reprepare", snapshot())'));
+  assert.ok(player.includes("requestSameLineReprepare"));
+  assert.ok(player.includes("showNetworkError"));
+  assert.ok(player.includes("MEDIA_ERR_NETWORK"));
+  assert.ok(container.includes("reprepare: [progress: PlaybackProgress]"));
+  assert.ok(container.includes("@reprepare=\"emit('reprepare', $event)\""));
+  // A hanging media request without an error event switches to the native
+  // mpv kernel (e.g. netdisk 原画 links that turn out to be Matroska) instead
+  // of staying stuck on the loading screen.
+  assert.ok(player.includes("STARTUP_TIMEOUT_MS"));
+  assert.ok(player.includes("armStartupWatchdog"));
+  assert.ok(player.includes('status.value !== "loading"'));
+  assert.ok(player.includes('emit("fallback", snapshot())'));
+});
+
+test("netdisk credentials are pre-checked before playback and prompt login when expired", async () => {
+  const app = await readFile(appPath, "utf8");
+  assert.ok(app.includes("shouldPromptPanLoginBeforePlayback"));
+  assert.ok(app.includes('status.accountState === "expired"'));
+  assert.ok(app.includes('status.accountState === "not-configured"'));
+  assert.ok(app.includes("precheckProvider"));
+  assert.ok(app.includes("detectPanPlaybackProvider(item, flag, episode)"));
+  assert.ok(app.includes("await startPanLogin(precheckProvider)"));
+  // The 401/403 backstop during playback stays in place.
+  assert.ok(app.includes("playbackNeedsPanLogin(e)"));
 });

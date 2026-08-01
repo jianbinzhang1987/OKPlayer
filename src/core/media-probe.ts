@@ -208,6 +208,9 @@ function detectMediaFormat(prefix: Uint8Array, mimeType: string, url: string): s
   if (/video\/(?:x-)?matroska/i.test(mimeType) || extension === "mkv") return "mkv";
   if (/video\/(?:x-)?flv/i.test(mimeType) || extension === "flv" || ascii(prefix, 0, 3) === "FLV") return "flv";
   if (/video\/webm/i.test(mimeType) || extension === "webm") return "webm";
+  // Matroska/WebM EBML magic (0x1A45DFA3) followed by the DocType. Probe
+  // responses often lack a content-type (netdisk signed links), so the
+  // container must be detected from the first bytes.
   if (hasBytes(prefix, [0x1a, 0x45, 0xdf, 0xa3])) return "mkv";
   if (/video\/mp2t/i.test(mimeType) || extension === "ts" || prefix[0] === 0x47) return "mpeg-ts";
   if (mimeType.startsWith("video/")) return extension || "video";

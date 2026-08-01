@@ -30,7 +30,11 @@ export class NativeLibmpvController implements PlaybackController {
 
   load(url: string, headers: Record<string, string> = {}) {
     this.requirePlayer().load(url, headers);
-    this.lastStopped = false;
+    // libmpv commonly reports `stopped` for one or more snapshots while a
+    // newly loaded network stream is still opening.  Treat that as the
+    // baseline state; otherwise the first poll manufactures an end-file event
+    // and the renderer immediately abandons a visible original-quality frame.
+    this.lastStopped = true;
     this.emitSnapshot();
   }
 

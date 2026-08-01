@@ -40,18 +40,26 @@ export function playbackLineScore(line: NavigationLine, preference: PlaybackLine
   const pan = PAN_LINE_PATTERN.test(label);
   let score = Math.min(20, line.episodes.length / 5);
 
+  if (pan) {
+    // Netdisk lines: original quality is the primary value. 原画 lines
+    // (夸克原画 / 百度原画) win over 极速/秒播 speed lines regardless of the
+    // global preference, now that pan original links play through the web
+    // engine. Speed lines remain the runtime fallback target.
+    if (quality) score += 120;
+    if (direct) score += 70;
+    if (stable) score += 40;
+    score -= 10;
+    return score;
+  }
+
   if (preference === "quality") {
     if (quality) score += 110;
     if (direct) score += 80;
     if (stable) score += 30;
-    if (pan) score -= 10;
   } else {
     if (direct) score += 110;
     if (stable) score += 90;
     if (quality) score += 15;
-    if (pan) score -= 30;
-    if (pan && stable) score += 35;
-    if (pan && quality && !stable) score -= 20;
   }
   return score;
 }

@@ -66,6 +66,49 @@ test("desktop playback prepares an opaque embedded session and supports fallback
   assert.deepEqual(fixture.service.close(prepared.sessionId), { closed: true });
 });
 
+test("web playback can consume media through the loopback HTTP gateway", async () => {
+  const fixture = createServices();
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url: "https://cdn.example.com/demo.mp4", headers: {}, format: "mp4", resolvedBy: "direct" as const }),
+      playerResult: async () => ({ key: "s", flag: "line", url: "https://cdn.example.com/demo.mp4", parse: 0, playUrl: "", header: {} }),
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async () => undefined, stop: async () => undefined },
+    { sniff: async () => { throw new Error("不应调用嗅探"); }, cancel: () => undefined },
+    fixture.sessions,
+    async (url: string) => ({ ok: true, url, statusCode: 206, mimeType: "video/mp4", bytesRead: 32, format: "mp4", reason: "ok" }),
+    undefined,
+    undefined,
+    (session) => `http://127.0.0.1:43210/session/${session.id}/resource/root`,
+  );
+  const prepared = await service.prepare({ siteKey: "s", flag: "直连", episodeUrl: "episode-1" });
+  assert.equal(prepared.engine, "web");
+  assert.match(prepared.playbackUrl, /^http:\/\/127\.0\.0\.1:43210\/session\//);
+});
+
+test("native playback can use an opaque local gateway without passing pan headers to mpv", async () => {
+  const opened: Array<{ url: string; headers?: Record<string, string> }> = [];
+  const sessions = new PlaybackSessionStore();
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url: "https://cdn.example.com/protected.mkv", headers: { Cookie: "secret" }, format: "mkv", resolvedBy: "direct" as const }),
+      playerResult: async () => ({ key: "s", flag: "夸克原画", url: "", parse: 0, playUrl: "", header: {} }),
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async (url: string, headers?: Record<string, string>) => { opened.push({ url, headers }); }, stop: async () => undefined },
+    { sniff: async () => { throw new Error("不应调用嗅探"); }, cancel: () => undefined },
+    sessions,
+    async (url: string) => ({ ok: true, url, statusCode: 206, mimeType: "video/x-matroska", bytesRead: 32, format: "mkv", reason: "ok" }),
+    undefined,
+    (session) => ({ url: `http://127.0.0.1:43210/session/${session.id}/resource/root` }),
+  );
+  const prepared = await service.prepare({ siteKey: "catvod:quark", flag: "夸克原画", episodeUrl: "episode-1" });
+  await service.fallback(prepared.sessionId);
+  assert.match(opened[0]?.url ?? "", /^http:\/\/127\.0\.0\.1:43210\/session\//);
+  assert.deepEqual(opened[0]?.headers, undefined);
+});
+
 test("external playback is allowed only for sessions without protected headers", async () => {
   const calls: Array<{ url: string; preference: string }> = [];
   const source = {
@@ -95,7 +138,7 @@ test("external playback is allowed only for sessions without protected headers",
   await assert.rejects(() => service.openExternal(protectedSession.id, "iina"), /不能安全传递/);
 });
 
-test("pan speed media stays web-compatible while original quality prefers compatibility playback", () => {
+test("netdisk original-quality MP4 prefers compatibility playback while ordinary MP4 stays web-compatible", () => {
   assert.equal(selectPlaybackEngine(
     "mp4",
     "https://video-play-c-zb.pds.quark.cn/movie",
@@ -107,7 +150,7 @@ test("pan speed media stays web-compatible while original quality prefers compat
     "https://video-play-c-zb.pds.quark.cn/movie.m3u8",
     { Cookie: "redacted", "User-Agent": "FongMi" },
     { siteKey: "catvod:quark", flag: "夸克原画" },
-  ), "mpv");
+  ), "web");
   assert.equal(selectPlaybackEngine(
     "mp4",
     "https://cdn.example.com/movie.mp4",
@@ -136,7 +179,7 @@ test("protected extensionless media is probed before engine routing", async () =
   assert.match(prepared.playbackUrl, /^fongmi-media:\/\/session\//);
 });
 
-test("local Quark original proxy is unwrapped and routed to Matroska compatibility playback", async () => {
+test("local Quark original proxy is unwrapped and its MKV container routes straight to mpv", async () => {
   const upstreamUrl = "https://dl-pc-zb.drive.quark.cn/file/opaque-token";
   const upstreamHeaders = {
     "User-Agent": "quark-cloud-drive/2.5.20",
@@ -162,15 +205,17 @@ test("local Quark original proxy is unwrapped and routed to Matroska compatibili
 
   const prepared = await service.prepare({ siteKey: "catvod:demo", flag: "夸克原画", episodeUrl: "episode-1" });
   const session = sessions.get(prepared.sessionId);
+  assert.equal(probes.length, 1);
   assert.equal(probes[0]?.url, upstreamUrl);
-  assert.deepEqual(probes[0]?.headers, upstreamHeaders);
-  assert.equal(session.sourceUrl, upstreamUrl);
-  assert.deepEqual(session.headers, upstreamHeaders);
+  // Playback stays on the proxy URL so the CatVod proxy pulls the CDN with
+  // parallel chunked streams instead of a slow single direct connection.
+  assert.equal(session.sourceUrl, proxyUrl);
+  assert.deepEqual(session.headers, {});
   assert.equal(prepared.format, "mkv");
   assert.equal(prepared.engine, "mpv");
 });
 
-test("local Baidu original proxy is unwrapped inside the main-process playback session", async () => {
+test("local Baidu original proxy is unwrapped and its MP4 container routes to libmpv", async () => {
   const upstreamUrl = "https://bdd0.baidupcs.com/file/opaque-token";
   const payload = Buffer.from(JSON.stringify({
     url: upstreamUrl,
@@ -198,12 +243,137 @@ test("local Baidu original proxy is unwrapped inside the main-process playback s
 
   const prepared = await service.prepare({ siteKey: "catvod:nodejs_demo", flag: "百度原画", episodeUrl: "episode-1" });
   const session = sessions.get(prepared.sessionId);
+  assert.equal(probes.length, 1);
   assert.equal(probes[0]?.url, upstreamUrl);
   assert.deepEqual(probes[0]?.headers, { "User-Agent": "AndroidXMedia/1.5.1" });
   assert.equal(session.sourceUrl, upstreamUrl);
   assert.deepEqual(session.headers, { "User-Agent": "AndroidXMedia/1.5.1" });
   assert.equal(prepared.format, "mp4");
   assert.equal(prepared.engine, "mpv");
+});
+
+test("a failed advisory probe on a pan proxy keeps the format unknown without flipping the line", async () => {
+  const upstreamUrl = "https://dl-pc-zb.drive.quark.cn/file/opaque-token";
+  const payload = Buffer.from(JSON.stringify({ url: upstreamUrl, headers: { Cookie: "session=redacted" } })).toString("base64url");
+  const proxyUrl = `http://127.0.0.1:54669/spider/demo/3/proxy/quark/session-id?pst=${payload}`;
+  const sessions = new PlaybackSessionStore();
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url: proxyUrl, headers: {}, resolvedBy: "direct" as const }),
+      playerResult: async () => ({ key: "s", flag: "夸克原画", url: proxyUrl, parse: 0, playUrl: "", header: {} }),
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async () => undefined, stop: async () => undefined },
+    { sniff: async () => { throw new Error("不应调用嗅探"); }, cancel: () => undefined },
+    sessions,
+    async (url: string) => ({ ok: false, url, statusCode: 412, mimeType: "text/html", bytesRead: 0, reason: "HTTP 412" }),
+  );
+
+  const prepared = await service.prepare({ siteKey: "catvod:demo", flag: "夸克原画", episodeUrl: "episode-1" });
+  assert.equal(prepared.format, "unknown");
+  assert.equal(prepared.engine, "web");
+  assert.equal(sessions.get(prepared.sessionId).sourceUrl, proxyUrl);
+});
+
+test("a pan proxy probe that THROWS (abort/timeout) must not flip the line or burn the link", async () => {
+  const upstreamUrl = "https://dl-pc-zb.drive.quark.cn/file/opaque-token";
+  const payload = Buffer.from(JSON.stringify({ url: upstreamUrl, headers: { Cookie: "session=redacted" } })).toString("base64url");
+  const proxyUrl = `http://127.0.0.1:54669/spider/demo/3/proxy/quark/session-id?pst=${payload}`;
+  const sessions = new PlaybackSessionStore();
+  let snifferCalled = false;
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url: proxyUrl, headers: {}, resolvedBy: "direct" as const }),
+      playerResult: async () => { throw new Error("不应调用解析兜底"); },
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async () => undefined, stop: async () => undefined },
+    { sniff: async () => { snifferCalled = true; throw new Error("网页嗅探不应参与代理链接"); }, cancel: () => undefined },
+    sessions,
+    async () => {
+      // probeMediaUrl aborts on the 4s timeout; the AbortError THROWS instead
+      // of returning a MediaProbeResult. This must be swallowed for pan
+      // proxies — it previously leaked into the sniffer fallback and flipped
+      // the line (夸克原画 → 百度原画).
+      throw new DOMException("The operation was aborted", "AbortError");
+    },
+  );
+
+  const prepared = await service.prepare({ siteKey: "catvod:demo", flag: "夸克原画", episodeUrl: "episode-1" });
+  assert.equal(prepared.format, "unknown");
+  assert.equal(prepared.engine, "web");
+  assert.equal(snifferCalled, false);
+  assert.equal(sessions.get(prepared.sessionId).sourceUrl, proxyUrl);
+});
+
+test("a CatVod pan proxy carrying pst is unwrapped even when its host has not been rebound yet", async () => {
+  const upstreamUrl = "https://dl-pc-zb.drive.quark.cn/file/opaque-token";
+  const payload = Buffer.from(JSON.stringify({ url: upstreamUrl, headers: { Cookie: "session=redacted" } })).toString("base64url");
+  const proxyUrl = `http://catvod-runtime.invalid/spider/demo/3/proxy/quark/session-id?pst=${payload}`;
+  let probeCalls = 0;
+  const sessions = new PlaybackSessionStore();
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url: proxyUrl, headers: {}, resolvedBy: "direct" as const }),
+      playerResult: async () => ({ key: "s", flag: "夸克原画", url: proxyUrl, parse: 0, playUrl: "", header: {} }),
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async () => undefined, stop: async () => undefined },
+    { sniff: async () => { throw new Error("不应调用嗅探"); }, cancel: () => undefined },
+    sessions,
+    async (url: string) => {
+      probeCalls += 1;
+      return { ok: true, url, statusCode: 206, mimeType: "video/x-matroska", bytesRead: 32, format: "mkv", reason: "ok" };
+    },
+  );
+  const prepared = await service.prepare({ siteKey: "catvod:demo", flag: "夸克原画", episodeUrl: "episode-1" });
+  assert.equal(probeCalls, 1);
+  assert.equal(sessions.get(prepared.sessionId).sourceUrl, proxyUrl);
+});
+
+test("raw local pan proxies are probed and original-quality MP4 uses libmpv", async () => {
+  let probeCalls = 0;
+  const proxyUrl = "http://127.0.0.1:54669/spider/demo/3/proxy/quark/session-id";
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url: proxyUrl, headers: {}, resolvedBy: "direct" as const }),
+      playerResult: async () => ({ key: "s", flag: "夸克原画", url: proxyUrl, parse: 0, playUrl: "", header: {} }),
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async () => undefined, stop: async () => undefined },
+    { sniff: async () => { throw new Error("不应调用嗅探"); }, cancel: () => undefined },
+    new PlaybackSessionStore(),
+    async (url: string) => {
+      probeCalls += 1;
+      return { ok: true, url, statusCode: 206, mimeType: "video/mp4", bytesRead: 32, format: "mp4", reason: "ok" };
+    },
+  );
+
+  const prepared = await service.prepare({ siteKey: "catvod:demo", flag: "夸克原画", episodeUrl: "episode-1" });
+  assert.equal(probeCalls, 1);
+  assert.equal(prepared.engine, "mpv");
+});
+
+test("a 412 response from a pan original link is reported as an expired link for same-line re-fetch", async () => {
+  const url = "https://dl-pc-zb.drive.quark.cn/file/opaque-token";
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => ({ url, headers: { Cookie: "session=redacted" }, resolvedBy: "direct" as const }),
+      playerResult: async () => ({ key: "s", flag: "夸克原画", url, parse: 0, playUrl: "", header: {} }),
+      getConfig: () => ({ ads: [] }),
+    },
+    { open: async () => undefined, stop: async () => undefined },
+    { sniff: async () => { throw new Error("不应调用嗅探"); }, cancel: () => undefined },
+    new PlaybackSessionStore(),
+    async (url: string) => ({ ok: false, url, statusCode: 412, mimeType: "text/html", bytesRead: 32, reason: "HTTP 412" }),
+  );
+
+  await assert.rejects(
+    service.prepare({ siteKey: "catvod:quark", flag: "夸克原画", episodeUrl: "quark://episode-1" }),
+    (error: any) => error?.code === "MEDIA_URL_EXPIRED"
+      && error?.retryable === true
+      && error?.sourceImpact === "none",
+  );
 });
 
 test("protected pan media reports expired authentication without degrading the source", async () => {

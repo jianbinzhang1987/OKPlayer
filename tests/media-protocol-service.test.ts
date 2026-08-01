@@ -26,7 +26,13 @@ test("media protocol forwards protected headers and byte ranges", async () => {
   });
   const service = new MediaProtocolService(sessions, fetchMedia);
   const response = await service.handle(new Request(sessions.playbackUrl(session.id), {
-    headers: { Range: "bytes=0-127", "If-Range": "etag-1", Host: "malicious.invalid" },
+    headers: {
+      Range: "bytes=0-127",
+      "If-Range": "etag-1",
+      "If-None-Match": "stale-etag",
+      "If-Modified-Since": "Sat, 01 Aug 2026 00:00:00 GMT",
+      Host: "malicious.invalid",
+    },
   }));
 
   assert.equal(response.status, 206);
@@ -35,10 +41,54 @@ test("media protocol forwards protected headers and byte ranges", async () => {
   assert.equal(calls[0]?.input, "https://cdn.example.com/video.mp4");
   assert.equal(calls[0]?.headers.get("range"), "bytes=0-127");
   assert.equal(calls[0]?.headers.get("if-range"), "etag-1");
+  assert.equal(calls[0]?.headers.get("if-none-match"), null);
+  assert.equal(calls[0]?.headers.get("if-modified-since"), null);
   assert.equal(calls[0]?.headers.get("referer"), "https://player.example.com/");
   assert.equal(calls[0]?.headers.get("cookie"), "sid=secret");
   assert.equal(calls[0]?.headers.get("x-token"), "abc");
   assert.equal(calls[0]?.headers.get("host"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("pragma"), "no-cache");
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin");
+});
+
+test("media protocol strips source cache validators from protected range requests", async () => {
+  const sessions = new PlaybackSessionStore();
+  const session = sessions.create({
+    url: "https://cdn.example.com/video.mkv",
+    headers: {
+      Cookie: "sid=secret",
+      "If-None-Match": "source-etag",
+      "If-Modified-Since": "Sat, 01 Aug 2026 00:00:00 GMT",
+    },
+    format: "mkv",
+    resolvedBy: "direct",
+  });
+  let forwarded = new Headers();
+  const service = new MediaProtocolService(sessions, async (_url, init) => {
+    forwarded = new Headers(init?.headers);
+    return new Response(new Uint8Array([1]), {
+      status: 206,
+      headers: {
+        etag: "upstream-etag",
+        "last-modified": "Sat, 01 Aug 2026 00:00:00 GMT",
+        "content-range": "bytes 0-0/1",
+      },
+    });
+  });
+
+  const response = await service.handle(new Request(sessions.playbackUrl(session.id), {
+    headers: { Range: "bytes=0-0", "If-None-Match": "player-etag" },
+  }));
+
+  assert.equal(forwarded.get("range"), "bytes=0-0");
+  assert.equal(forwarded.get("cookie"), "sid=secret");
+  assert.equal(forwarded.get("if-none-match"), null);
+  assert.equal(forwarded.get("if-modified-since"), null);
+  assert.equal(response.headers.get("etag"), null);
+  assert.equal(response.headers.get("last-modified"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
 test("media protocol forwards independent seek ranges and HEAD without mixing session credentials", async () => {

@@ -216,6 +216,7 @@ type PlayingState = {
   vodId: string;
   episodeUrl: string;
   startPosition?: number;
+  attemptedFlags: string[];
 };
 type Page = "home" | "library" | "search" | "favorites" | "history" | "sources" | "accounts" | "settings" | "detail";
 type FolderTrailItem = { siteKey: string; folderId: string; title: string };
@@ -929,6 +930,11 @@ function playbackFailureAffectsSource(value: unknown): boolean {
 function playbackNeedsPanLogin(value: unknown): boolean {
   const code = (value as RendererPlaybackFailure)?.code;
   return code === "AUTH_REQUIRED" || code === "AUTH_EXPIRED";
+}
+
+function shouldPromptPanLoginBeforePlayback(status: PanProviderStatus | undefined): boolean {
+  if (!status) return false;
+  return status.accountState === "expired" || status.accountState === "not-configured";
 }
 
 function playbackAllowsLineFallback(value: unknown): boolean {
@@ -2056,9 +2062,27 @@ async function play(
   startPosition = 0,
   attemptedFlags: readonly string[] = [],
   attemptedSiteKeys: readonly string[] = [],
+  sameLineRetries = 0,
 ) {
   const item = selected.value;
   if (!item?.siteKey) return;
+  // Pre-check netdisk credentials before resolving a pan line. A stale
+  // credential is the most common reason pan original-quality playback
+  // fails; guiding the user to re-login first avoids a guaranteed failed
+  // attempt. Only a definitely-expired credential blocks here — a missing
+  // status may still be a playable public share, so it falls through to the
+  // 401/403 backstop during playback.
+  const precheckProvider = detectPanPlaybackProvider(item, flag, episode);
+  if (precheckProvider && shouldPromptPanLoginBeforePlayback(panStatuses.value[precheckProvider])) {
+    pendingPanPlayback.value = {
+      item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
+      flag,
+      episode: { ...episode },
+      startPosition: Math.max(0, startPosition),
+    };
+    await startPanLogin(precheckProvider);
+    return;
+  }
   await clearExternalFallbackSession();
   const requestId = ++playbackRequestId;
   let preparedSessionId = "";
@@ -2110,6 +2134,7 @@ async function play(
       vodId: item.vodId,
       episodeUrl: episode.url,
       startPosition: Math.max(0, startPosition),
+      attemptedFlags: [...attemptedFlags],
     };
     paused.value = false;
     playbackStatus.value = prepared.engine === "mpv"
@@ -2132,11 +2157,39 @@ async function play(
       await startPanLogin(panProvider);
       return;
     }
+    // Netdisk signed links are short-lived: a 412/link-expiry usually means
+    // the link expired between resolution and the first media request, not
+    // that the line is dead. Re-fetch a fresh link for the SAME line once
+    // before falling back to switching lines. This is the highest-yield
+    // recovery for pan original-quality playback. SOURCE_RESOLVE_FAILED is
+    // included because CatVod pan spiders (e.g. duoduo) intermittently time
+    // out their play request (HTTP 500 "请求超时") — a same-line retry almost
+    // always succeeds, while switching lines jumps the user to another
+    // provider entirely.
+    const failureCode = (e as RendererPlaybackFailure)?.code;
+    if (sameLineRetries === 0 && (failureCode === "MEDIA_URL_EXPIRED" || failureCode === "SOURCE_RESOLVE_FAILED")) {
+      if (preparedSessionId) await window.tvApi.closePlayback(preparedSessionId).catch(() => undefined);
+      playbackStatus.value = failureCode === "MEDIA_URL_EXPIRED"
+        ? "网盘播放地址已失效，正在重新获取后继续播放…"
+        : "播放地址解析超时，正在重试当前线路…";
+      await play(flag, episode, startPosition, attemptedFlags, attemptedSiteKeys, 1);
+      return;
+    }
     const fallback = autoFallbackLine.value && playbackAllowsLineFallback(e)
       ? resolveFallbackPlaybackLine(item.flags, flag, episode, attemptedFlags, linePreference.value)
       : undefined;
     if (fallback) {
       if (preparedSessionId) await window.tvApi.closePlayback(preparedSessionId).catch(() => undefined);
+      // Surface the exact failure to the main-process log so line switching
+      // can be diagnosed without guessing.
+      console.error("[playback-line-fallback]", {
+        fromFlag: flag,
+        toFlag: fallback.line.flag,
+        toLine: fallback.line.show ?? fallback.line.flag,
+        episode: episode.name,
+        code: failureCode ?? "UNKNOWN",
+        message: playbackFailureMessage(e),
+      });
       selectedFlag.value = fallback.line.flag;
       playbackStatus.value = `线路“${flag}”不可用，正在自动尝试“${fallback.line.show || fallback.line.flag}”…`;
       await play(fallback.line.flag, fallback.episode, startPosition, [...attemptedFlags, flag], attemptedSiteKeys);
@@ -2327,6 +2380,17 @@ async function fallbackEmbeddedPlayback(progress: PlaybackProgress) {
   await loadLibrary(false);
 }
 
+async function handleWebPlayerReprepare(progress: PlaybackProgress) {
+  const current = playing.value;
+  if (!current) return;
+  await saveEmbeddedProgress(progress);
+  await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+  playing.value = null;
+  paused.value = false;
+  playbackStatus.value = "播放地址可能已过期，正在重新获取后继续播放…";
+  await play(current.flag, { name: current.episode, url: current.episodeUrl }, Math.max(0, progress.position), [], [], 1);
+}
+
 async function handleCompatibilityPlaybackFailure(payload: CompatibilityPlaybackFailure) {
   const current = playing.value;
   if (!current) return;
@@ -2336,12 +2400,20 @@ async function handleCompatibilityPlaybackFailure(payload: CompatibilityPlayback
   const currentLine = item?.flags?.find((line) => line.flag === current.flag);
   const currentEpisode = currentLine?.episodes.find((episode) => episode.url === current.episodeUrl)
     ?? { name: current.episode, url: current.episodeUrl };
-  const fallback = resolveFallbackPlaybackLine(item?.flags, current.flag, currentEpisode, [current.flag], "stable");
+  const attemptedFlags = current.attemptedFlags ?? [];
+  const fallback = resolveFallbackPlaybackLine(item?.flags, current.flag, currentEpisode, attemptedFlags, "stable");
   if (!fallback) {
     playbackStatus.value = `${payload.reason} 当前内容没有可继续尝试的备用线路。`;
     return;
   }
 
+  console.error(`[playback-compat-failure] ${JSON.stringify({
+    fromFlag: current.flag,
+    toFlag: fallback.line.flag,
+    episode: currentEpisode.name,
+    reason: payload.reason,
+    progress: Math.round(Math.max(0, payload.progress.position)),
+  })}`);
   await saveEmbeddedProgress(payload.progress);
   await window.tvApi.stop?.().catch(() => undefined);
   await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
@@ -2353,7 +2425,7 @@ async function handleCompatibilityPlaybackFailure(payload: CompatibilityPlayback
     fallback.line.flag,
     fallback.episode,
     Math.max(0, payload.progress.position),
-    [current.flag],
+    [...attemptedFlags, current.flag],
   );
 }
 
@@ -3638,6 +3710,7 @@ onBeforeUnmount(() => {
       @select-episode="selectEmbeddedEpisode"
       @close="closeEmbeddedPlayback"
       @fallback="fallbackEmbeddedPlayback"
+      @reprepare="handleWebPlayerReprepare"
       @compatibility-failure="handleCompatibilityPlaybackFailure"
       @engine-fallback="handleWebPlayerEngineFallback"
     />

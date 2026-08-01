@@ -45,13 +45,30 @@ test("preferred playback line favors direct media over a share page", () => {
   assert.equal(result?.flag, "hls");
 });
 
-test("stable preference selects Quark speed while quality preference selects original", () => {
+test("netdisk lines prefer original quality regardless of the line preference", () => {
   const quarkLines = [
     { flag: "夸克原画", episodes: [{ name: "第1集", url: "encoded-quark-file" }] },
     { flag: "夸克极速", episodes: [{ name: "第1集", url: "encoded-quark-file" }] },
   ];
-  assert.equal(resolvePreferredPlaybackLine(quarkLines, "stable")?.flag, "夸克极速");
+  assert.equal(resolvePreferredPlaybackLine(quarkLines, "stable")?.flag, "夸克原画");
   assert.equal(resolvePreferredPlaybackLine(quarkLines, "quality")?.flag, "夸克原画");
+});
+
+test("netdisk original quality outranks a direct speed line", () => {
+  const lines = [
+    { flag: "夸克极速", episodes: [{ name: "第1集", url: "https://cdn.example.com/movie.m3u8" }] },
+    { flag: "夸克原画", episodes: [{ name: "第1集", url: "encoded-quark-file" }] },
+  ];
+  assert.equal(resolvePreferredPlaybackLine(lines, "stable")?.flag, "夸克原画");
+});
+
+test("non-netdisk sources keep stable preference choosing speed lines first", () => {
+  const lines = [
+    { flag: "超清", episodes: [{ name: "第1集", url: "share-token" }] },
+    { flag: "极速", episodes: [{ name: "第1集", url: "share-token" }] },
+  ];
+  assert.equal(resolvePreferredPlaybackLine(lines, "stable")?.flag, "极速");
+  assert.equal(resolvePreferredPlaybackLine(lines, "quality")?.flag, "超清");
 });
 
 test("empty and generic lines remain behind stable or quality-labelled lines", () => {
