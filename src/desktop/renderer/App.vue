@@ -1802,7 +1802,8 @@ async function loadLibraryCategoryPage(pageNumber: number, append: boolean) {
       activeSite.value,
       category.id,
       String(pageNumber),
-      sourceCategories.length === 1 ? libraryFilters.value : {},
+      // Vue refs expose Proxy objects; Electron IPC accepts only structured-cloneable data.
+      sourceCategories.length === 1 ? { ...libraryFilters.value } : {},
     )));
     const successful = responses.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
     if (!successful.length) {
@@ -2178,11 +2179,7 @@ async function play(
       attemptedFlags: [...attemptedFlags],
     };
     paused.value = false;
-    playbackStatus.value = prepared.engine === "mpv"
-      ? playbackEnginePreferences.value[playbackEnginePreferenceKey(item.siteKey, flag, episode.url)]
-        ? "已根据该线路历史表现优先使用高兼容播放模式。"
-        : "当前线路已使用高兼容播放模式。"
-      : prepared.resolvedBy === "browser-sniffer" ? "已通过网页嗅探获得媒体地址" : "";
+    playbackStatus.value = prepared.resolvedBy === "browser-sniffer" ? "已通过网页嗅探获得媒体地址" : "";
     await loadLibrary(false);
   } catch (e) {
     if (requestId !== playbackRequestId) return;

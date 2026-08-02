@@ -61,8 +61,15 @@ let stopRequested = false;
 let playbackConfirmed = false;
 let failureReported = false;
 let startupWatchdog: ReturnType<typeof setTimeout> | undefined;
+let nativeSeekTimer: ReturnType<typeof setTimeout> | undefined;
+let nativeSeekInFlight = false;
+let queuedSeekPosition: number | undefined;
+let optimisticSeekPosition: number | undefined;
+let optimisticSeekStateUntil = 0;
 
 const STARTUP_TIMEOUT_MS = 15_000;
+const NATIVE_SEEK_DEBOUNCE_MS = 80;
+const OPTIMISTIC_SEEK_STATE_WINDOW_MS = 1_000;
 
 const progressPercent = computed(() => duration.value > 0 ? Math.min(100, Math.max(0, (position.value / duration.value) * 100)) : 0);
 const statusText = computed(() => {
@@ -160,8 +167,56 @@ function formatTime(value: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function clampSeekPosition(value: number) {
+  const normalized = Math.max(0, Number(value) || 0);
+  return duration.value > 0 ? Math.min(duration.value, normalized) : normalized;
+}
+
+function cancelQueuedNativeSeek() {
+  if (nativeSeekTimer) clearTimeout(nativeSeekTimer);
+  nativeSeekTimer = undefined;
+  queuedSeekPosition = undefined;
+  optimisticSeekPosition = undefined;
+  optimisticSeekStateUntil = 0;
+}
+
+function queueNativeSeek(value: number) {
+  const target = clampSeekPosition(value);
+  // Holding an arrow key can otherwise send dozens of absolute mpv seeks per
+  // second. Keep 10-second steps precise in the UI, then send only the latest
+  // target once the key burst settles.
+  queuedSeekPosition = target;
+  optimisticSeekPosition = target;
+  optimisticSeekStateUntil = Date.now() + OPTIMISTIC_SEEK_STATE_WINDOW_MS;
+  position.value = target;
+  if (nativeSeekTimer) clearTimeout(nativeSeekTimer);
+  nativeSeekTimer = setTimeout(() => {
+    nativeSeekTimer = undefined;
+    void flushQueuedNativeSeek();
+  }, NATIVE_SEEK_DEBOUNCE_MS);
+}
+
+async function flushQueuedNativeSeek() {
+  if (nativeSeekInFlight || stopRequested) return;
+  const target = queuedSeekPosition;
+  queuedSeekPosition = undefined;
+  if (target === undefined) return;
+  nativeSeekInFlight = true;
+  try {
+    await window.tvApi.seek?.(target);
+    position.value = target;
+    emit("progress", snapshot());
+  } catch (error) {
+    reportCompatibilityFailure(`跳转播放位置失败：${friendlyPlaybackError(error)}`);
+  } finally {
+    nativeSeekInFlight = false;
+    if (queuedSeekPosition !== undefined && !stopRequested) queueNativeSeek(queuedSeekPosition);
+  }
+}
+
 async function startNativePlayback() {
   clearStartupWatchdog();
+  cancelQueuedNativeSeek();
   stopRequested = false;
   status.value = "loading";
   errorMessage.value = "";
@@ -187,6 +242,7 @@ async function startNativePlayback() {
 async function stopNativePlayback() {
   stopRequested = true;
   clearStartupWatchdog();
+  cancelQueuedNativeSeek();
   await window.tvApi.stop?.().catch(() => undefined);
 }
 
@@ -205,9 +261,7 @@ async function seekTo(event: Event) {
   const target = event.target as HTMLInputElement;
   const nextPosition = Number(target.value);
   if (!Number.isFinite(nextPosition)) return;
-  position.value = Math.max(0, nextPosition);
-  await window.tvApi.seek?.(position.value);
-  emit("progress", snapshot());
+  queueNativeSeek(nextPosition);
 }
 
 async function changeSpeed() {

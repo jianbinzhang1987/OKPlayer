@@ -53,6 +53,59 @@ test("media protocol forwards protected headers and byte ranges", async () => {
   assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin");
 });
 
+test("media protocol safely forwards source headers containing non-ByteString characters", async () => {
+  const sessions = new PlaybackSessionStore();
+  const session = sessions.create({
+    url: "https://cdn.example.com/video.mp4",
+    headers: { Referer: "https://player.example.com/中文", Cookie: "sid=中文" },
+    format: "mp4",
+    resolvedBy: "direct",
+  });
+  let forwarded = new Headers();
+  const service = new MediaProtocolService(sessions, async (_url, init) => {
+    forwarded = new Headers(init?.headers);
+    return new Response(new Uint8Array([1]), { status: 206, headers: { "content-range": "bytes 0-0/1" } });
+  });
+
+  const response = await service.handle(new Request(sessions.playbackUrl(session.id)));
+
+  assert.equal(response.status, 206);
+  assert.equal(forwarded.get("referer"), "https://player.example.com/%E4%B8%AD%E6%96%87");
+  assert.equal(forwarded.get("cookie"), "sid=%E4%B8%AD%E6%96%87");
+});
+
+test("a newer seek range aborts the stale in-flight media request", async () => {
+  const sessions = new PlaybackSessionStore();
+  const session = sessions.create({
+    url: "https://cdn.example.com/video.mp4",
+    headers: {},
+    format: "mp4",
+    resolvedBy: "direct",
+  });
+  let requestCount = 0;
+  let firstWasAborted = false;
+  const service = new MediaProtocolService(sessions, async (_url, init) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          firstWasAborted = true;
+          reject(new DOMException("aborted", "AbortError"));
+        }, { once: true });
+      });
+    }
+    return new Response(new Uint8Array([1]), { status: 206, headers: { "content-range": "bytes 500-500/1000" } });
+  });
+
+  const first = service.handle(new Request(sessions.playbackUrl(session.id), { headers: { Range: "bytes=0-0" } }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const second = service.handle(new Request(sessions.playbackUrl(session.id), { headers: { Range: "bytes=500-500" } }));
+
+  assert.equal((await second).status, 206);
+  assert.equal((await first).status, 502);
+  assert.equal(firstWasAborted, true);
+});
+
 test("media protocol strips source cache validators from protected range requests", async () => {
   const sessions = new PlaybackSessionStore();
   const session = sessions.create({

@@ -33,6 +33,7 @@ export type MediaUpstreamResolver = (url: string, resource: PlaybackResource, se
 
 export class MediaProtocolService {
   private registered = false;
+  private readonly activeMediaFetches = new Map<string, AbortController>();
   private readonly sessions: PlaybackSessionStore;
   private readonly fetchMedia: MediaFetch;
   private readonly resolveUpstream: MediaUpstreamResolver;
@@ -64,12 +65,26 @@ export class MediaProtocolService {
       const { session, resource } = this.sessions.getResource(route.sessionId, route.resourceId);
       const upstreamUrl = this.resolveUpstream(resource.url, resource, session);
       assertRemoteMediaUrl(upstreamUrl);
+      const activeFetch = request.method === "GET" && resource.kind === "media"
+        ? this.beginMediaFetch(`${route.sessionId}:${route.resourceId}`)
+        : undefined;
 
-      const response = await this.fetchMedia(upstreamUrl, {
-        method: request.method,
-        headers: buildUpstreamHeaders(session, request.headers),
-        redirect: "follow",
-      });
+      let response: Response;
+      try {
+        response = await this.fetchMedia(upstreamUrl, {
+          method: request.method,
+          headers: buildUpstreamHeaders(session, request.headers),
+          redirect: "follow",
+          ...(activeFetch ? { signal: activeFetch.controller.signal } : {}),
+        });
+        // Only unresolved upstream requests are stale when a new seek starts.
+        // Once response headers are available, let the downstream reader own
+        // cancellation so overlapping byte ranges can finish independently.
+        if (activeFetch) this.finishMediaFetch(activeFetch.key, activeFetch.controller);
+      } catch (error) {
+        if (activeFetch) this.finishMediaFetch(activeFetch.key, activeFetch.controller);
+        throw error;
+      }
 
       // No URL or credentials are logged — only the response shape needed to
       // diagnose buffering (status, content type, range headers, timing).
@@ -90,6 +105,17 @@ export class MediaProtocolService {
       const message = error instanceof Error ? error.message : "媒体请求失败";
       return textResponse(message, /不存在|过期/.test(message) ? 404 : 502);
     }
+  }
+
+  private beginMediaFetch(key: string) {
+    this.activeMediaFetches.get(key)?.abort();
+    const controller = new AbortController();
+    this.activeMediaFetches.set(key, controller);
+    return { key, controller };
+  }
+
+  private finishMediaFetch(key: string, controller: AbortController): void {
+    if (this.activeMediaFetches.get(key) === controller) this.activeMediaFetches.delete(key);
   }
 
   private countedResponse(response: Response, startedAt: number): Response {
@@ -221,15 +247,30 @@ function buildUpstreamHeaders(session: PlaybackSession, incoming: Headers): Head
   for (const [name, value] of Object.entries(session.headers)) {
     const normalized = name.toLowerCase();
     if (!value || BLOCKED_UPSTREAM_HEADERS.has(normalized) || normalized.startsWith("sec-")) continue;
-    headers.set(name, value);
+    setUpstreamHeader(headers, name, value);
   }
   for (const [name, value] of incoming.entries()) {
-    if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
+    if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())) setUpstreamHeader(headers, name, value);
   }
   if (!headers.has("accept")) {
     headers.set("accept", "application/vnd.apple.mpegurl, application/x-mpegURL, video/*, audio/*, */*;q=0.5");
   }
   return headers;
+}
+
+function setUpstreamHeader(headers: Headers, name: string, value: string): void {
+  // Undici rejects non-ByteString header values. Some third-party source
+  // rules put Chinese paths or labels in Referer/Cookie values; percent-encode
+  // those code points before forwarding so one bad rule cannot crash Electron.
+  if (!value || /[\0\r\n]/.test(value)) return;
+  const byteString = Array.from(value, (character) => (character.codePointAt(0) ?? 0) > 0xff
+    ? encodeURIComponent(character)
+    : character).join("");
+  try {
+    headers.set(name, byteString);
+  } catch {
+    // Ignore malformed header names/values supplied by a content source.
+  }
 }
 
 function isHlsManifest(resource: PlaybackResource, response: Response): boolean {

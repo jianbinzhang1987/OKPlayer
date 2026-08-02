@@ -80,6 +80,15 @@ let networkErrorRetried = false;
 let startupWatchdog: ReturnType<typeof setTimeout> | undefined;
 let startupWatchdogExtensions = 0;
 let subtitleCueOrigins = new WeakMap<TextTrackCue, { start: number; end: number }>();
+let keyboardSeekTimer: ReturnType<typeof setTimeout> | undefined;
+let seekRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
+let queuedKeyboardSeekPosition: number | undefined;
+let activeSeekTarget: number | undefined;
+let seekResumeRequested = false;
+let seekRecoveryAttempts = 0;
+
+const WEB_SEEK_DEBOUNCE_MS = 100;
+const WEB_SEEK_RECOVERY_TIMEOUT_MS = 8_000;
 
 const resolvedSubtitleSettings = computed(() => normalizeSubtitleSettings(props.subtitleSettings));
 
@@ -125,7 +134,10 @@ function toggleEpisodeDrawer() {
 }
 
 function snapshot() {
-  const position = Number.isFinite(video.value?.currentTime) ? Math.max(0, video.value?.currentTime ?? 0) : 0;
+  const mediaPosition = Number.isFinite(video.value?.currentTime) ? Math.max(0, video.value?.currentTime ?? 0) : 0;
+  const position = activeSeekTarget !== undefined && mediaPosition + 3 < activeSeekTarget
+    ? activeSeekTarget
+    : mediaPosition;
   const total = Number.isFinite(video.value?.duration) ? Math.max(0, video.value?.duration ?? 0) : 0;
   return {
     position,
@@ -148,6 +160,70 @@ function clearFallbackTimer() {
 function clearStartupWatchdog() {
   if (startupWatchdog) clearTimeout(startupWatchdog);
   startupWatchdog = undefined;
+}
+
+function clearSeekRecovery() {
+  if (keyboardSeekTimer) clearTimeout(keyboardSeekTimer);
+  if (seekRecoveryTimer) clearTimeout(seekRecoveryTimer);
+  keyboardSeekTimer = undefined;
+  seekRecoveryTimer = undefined;
+  queuedKeyboardSeekPosition = undefined;
+  activeSeekTarget = undefined;
+  seekResumeRequested = false;
+  seekRecoveryAttempts = 0;
+}
+
+function clampWebSeekPosition(element: HTMLVideoElement, value: number) {
+  const target = Math.max(0, Number(value) || 0);
+  return Number.isFinite(element.duration) ? Math.min(element.duration, target) : target;
+}
+
+function armSeekRecovery() {
+  if (seekRecoveryTimer) clearTimeout(seekRecoveryTimer);
+  seekRecoveryTimer = setTimeout(() => {
+    seekRecoveryTimer = undefined;
+    const element = video.value;
+    const target = activeSeekTarget;
+    if (!element || target === undefined || disposed || reprepareRequested) return;
+    if (seekRecoveryAttempts < 2) {
+      seekRecoveryAttempts += 1;
+      element.currentTime = clampWebSeekPosition(element, target);
+      if (seekResumeRequested) void element.play().catch(() => undefined);
+      armSeekRecovery();
+      return;
+    }
+    // A fresh opaque media session preserves the requested position while
+    // clearing a Chromium network pipeline that remained stuck after seeking.
+    requestSameLineReprepare();
+  }, WEB_SEEK_RECOVERY_TIMEOUT_MS);
+}
+
+function seekWebPlayer(target: number, resume: boolean) {
+  const element = video.value;
+  if (!element) return;
+  activeSeekTarget = clampWebSeekPosition(element, target);
+  seekResumeRequested = resume;
+  seekRecoveryAttempts = 0;
+  currentTime.value = activeSeekTarget;
+  element.currentTime = activeSeekTarget;
+  status.value = "buffering";
+  showControls();
+  armSeekRecovery();
+}
+
+function queueKeyboardSeek(delta: number) {
+  const element = video.value;
+  if (!element) return;
+  const base = queuedKeyboardSeekPosition ?? activeSeekTarget ?? element.currentTime;
+  queuedKeyboardSeekPosition = clampWebSeekPosition(element, base + delta);
+  currentTime.value = queuedKeyboardSeekPosition;
+  if (keyboardSeekTimer) clearTimeout(keyboardSeekTimer);
+  keyboardSeekTimer = setTimeout(() => {
+    keyboardSeekTimer = undefined;
+    const target = queuedKeyboardSeekPosition;
+    queuedKeyboardSeekPosition = undefined;
+    if (target !== undefined) seekWebPlayer(target, !element.paused);
+  }, WEB_SEEK_DEBOUNCE_MS);
 }
 
 function armStartupWatchdog() {
@@ -306,6 +382,7 @@ async function loadMedia() {
   const generation = ++loadGeneration;
   clearFallbackTimer();
   clearStartupWatchdog();
+  clearSeekRecovery();
   fallbackTriggered = false;
   errorMessage.value = "";
   status.value = "loading";
@@ -354,8 +431,8 @@ function onLoadedMetadata() {
   applySubtitlePreferences();
   duration.value = Number.isFinite(element.duration) ? element.duration : 0;
   element.playbackRate = speed.value;
-  const startPosition = Math.max(0, props.session.startPosition ?? 0);
-  if (!restoredPosition && startPosition > 0 && (!duration.value || startPosition < duration.value - 5)) {
+  const startPosition = Math.max(0, activeSeekTarget ?? props.session.startPosition ?? 0);
+  if ((activeSeekTarget !== undefined || !restoredPosition) && startPosition > 0 && (!duration.value || startPosition < duration.value - 5)) {
     element.currentTime = startPosition;
     currentTime.value = startPosition;
     restoredPosition = true;
@@ -365,7 +442,10 @@ function onLoadedMetadata() {
 function onTimeUpdate() {
   const element = video.value;
   if (!element) return;
-  currentTime.value = Number.isFinite(element.currentTime) ? element.currentTime : 0;
+  const mediaPosition = Number.isFinite(element.currentTime) ? element.currentTime : 0;
+  currentTime.value = activeSeekTarget !== undefined && mediaPosition + 3 < activeSeekTarget
+    ? activeSeekTarget
+    : mediaPosition;
   duration.value = Number.isFinite(element.duration) ? element.duration : duration.value;
   if (Date.now() - lastSavedAt >= 15_000) {
     lastSavedAt = Date.now();
@@ -373,7 +453,40 @@ function onTimeUpdate() {
   }
 }
 
+function onSeeking() {
+  const element = video.value;
+  if (!element) return;
+  if (activeSeekTarget === undefined) seekResumeRequested = !element.paused || status.value === "playing" || status.value === "buffering";
+  activeSeekTarget = clampWebSeekPosition(element, element.currentTime);
+  currentTime.value = activeSeekTarget;
+  status.value = "buffering";
+  showControls();
+  armSeekRecovery();
+}
+
+function onSeeked() {
+  const element = video.value;
+  if (!element) return;
+  const seekedPosition = clampWebSeekPosition(element, element.currentTime);
+  if (activeSeekTarget === undefined || Math.abs(seekedPosition - activeSeekTarget) <= 3) activeSeekTarget = seekedPosition;
+  currentTime.value = activeSeekTarget;
+  if (seekResumeRequested && element.paused) void element.play().catch(() => undefined);
+  armSeekRecovery();
+}
+
 function onPlaying() {
+  const element = video.value;
+  if (element && activeSeekTarget !== undefined && element.currentTime + 3 < activeSeekTarget) {
+    element.currentTime = clampWebSeekPosition(element, activeSeekTarget);
+    if (seekResumeRequested) void element.play().catch(() => undefined);
+    armSeekRecovery();
+    return;
+  }
+  if (seekRecoveryTimer) clearTimeout(seekRecoveryTimer);
+  seekRecoveryTimer = undefined;
+  activeSeekTarget = undefined;
+  seekResumeRequested = false;
+  seekRecoveryAttempts = 0;
   clearStartupWatchdog();
   clearFallbackTimer();
   fallbackTriggered = false;
@@ -383,6 +496,18 @@ function onPlaying() {
 }
 
 function onPaused() {
+  if (activeSeekTarget !== undefined && seekResumeRequested) {
+    status.value = "buffering";
+    controlsVisible.value = true;
+    clearControlsTimer();
+    window.setTimeout(() => {
+      const element = video.value;
+      if (!disposed && element && activeSeekTarget !== undefined && seekResumeRequested && element.paused) {
+        void element.play().catch(() => undefined);
+      }
+    }, 120);
+    return;
+  }
   status.value = "paused";
   controlsVisible.value = true;
   clearControlsTimer();
@@ -390,6 +515,10 @@ function onPaused() {
 }
 
 function onEnded() {
+  if (activeSeekTarget !== undefined) {
+    armSeekRecovery();
+    return;
+  }
   status.value = "ended";
   controlsVisible.value = true;
   clearControlsTimer();
@@ -473,10 +602,10 @@ function handleKeydown(event: KeyboardEvent) {
   }
   if (event.key === "ArrowLeft") {
     event.preventDefault();
-    element.currentTime = Math.max(0, element.currentTime - 10);
+    queueKeyboardSeek(-10);
   } else if (event.key === "ArrowRight") {
     event.preventDefault();
-    element.currentTime = Math.min(Number.isFinite(element.duration) ? element.duration : Infinity, element.currentTime + 10);
+    queueKeyboardSeek(10);
   } else if (event.key === "ArrowUp") {
     event.preventDefault();
     element.volume = Math.min(1, element.volume + 0.05);
@@ -507,6 +636,7 @@ onBeforeUnmount(() => {
   clearControlsTimer();
   clearFallbackTimer();
   clearStartupWatchdog();
+  clearSeekRecovery();
   disposeHls();
   window.removeEventListener("keydown", handleKeydown);
   const element = video.value;
@@ -579,6 +709,8 @@ onBeforeUnmount(() => {
         @dblclick.prevent="toggleFullscreen"
         @loadedmetadata="onLoadedMetadata"
         @timeupdate="onTimeUpdate"
+        @seeking="onSeeking"
+        @seeked="onSeeked"
         @loadstart="status = 'loading'"
         @waiting="status = 'buffering'; showControls()"
         @playing="onPlaying"

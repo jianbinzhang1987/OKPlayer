@@ -19,6 +19,9 @@ test("embedded player uses a configurable delayed compatibility fallback", async
   assert.ok(player.includes("短暂等待后将自动切换"));
   assert.ok(player.includes("已关闭自动切换"));
   assert.ok(player.includes("立即切换高兼容播放器"));
+  assert.ok(player.includes("queueKeyboardSeek"), "rapid keyboard seeks must be coalesced in the standard player");
+  assert.ok(player.includes("onSeeking"), "mouse timeline seeks must preserve playback state");
+  assert.ok(player.includes("requestSameLineReprepare()"), "a stuck post-seek media pipeline must recover at the requested position");
   assert.ok(policy.includes("AUTOMATIC_COMPATIBILITY_FALLBACK_DELAY_MS = 4_000"));
   assert.ok(app.includes("compatibilityFallbackMode"));
   assert.ok(app.includes("播放失败兼容策略"));

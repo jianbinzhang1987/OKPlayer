@@ -23,6 +23,7 @@ test("renderer exposes CatVod source home category filters pagination and discov
   ]) assert.ok(source.includes(marker), `missing renderer marker: ${marker}`);
   assert.match(source, /category\.id/);
   assert.match(source, /libraryFilters\[group\.key\]/);
+  assert.ok(source.includes("sourceCategories.length === 1 ? { ...libraryFilters.value } : {}"), "library filters must cross IPC as a plain object, not a Vue proxy");
   assert.match(source, /action === "serviceUpdated"[\s\S]*await startSourceAudit\(false\)/);
 
 });
