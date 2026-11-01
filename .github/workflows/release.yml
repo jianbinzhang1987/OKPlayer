@@ -94,13 +94,14 @@ jobs:
           retention-days: 14
 
   build-windows:
-    name: Build Windows packages
+    name: Build Windows native-libmpv packages
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       npm_config_audit: "false"
       npm_config_fund: "false"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -114,14 +115,74 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Configure Windows native audit tools
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          Add-Content -Path $env:GITHUB_PATH -Value $dumpbin.DirectoryName
+
+      - name: Download pinned Windows libmpv runtime
+        shell: pwsh
+        run: |
+          $releaseTag = "2026-08-01-1d15686142"
+          $archiveName = "mpv-dev-lgpl-x86_64-20260801-git-1d15686142.7z"
+          $expectedSha256 = "f82125c58012586b515e2243f6ecfae665941ff6210d592d81ede43bb7f62e65"
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+          $extract = Join-Path $env:RUNNER_TEMP "fongmi-libmpv-$releaseTag"
+          $url = "https://github.com/zhongfly/mpv-winbuild/releases/download/$releaseTag/$archiveName"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "libmpv SHA-256 mismatch: expected=$expectedSha256 actual=$actualSha256"
+          }
+
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          & $sevenZip x $archive "-o$extract" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip extraction failed with exit code $LASTEXITCODE" }
+
+          $library = Get-ChildItem $extract -Recurse -File | Where-Object {
+            $_.Name -in @("mpv-2.dll", "libmpv-2.dll", "libmpv.dll")
+          } | Select-Object -First 1
+          if (-not $library) { throw "No supported libmpv DLL found in pinned archive" }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_NATIVE_ARCH=x64"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_SOURCE=$($library.FullName)"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_DEPENDENCY_DIRS=$extract"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_VERSION=git-1d15686142"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_LICENSE=LGPL-2.1-or-later"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_LIBMPV_SOURCE_URL=https://github.com/mpv-player/mpv/tree/1d15686142"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_FFMPEG_VERSION=git-946272b79"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_FFMPEG_LICENSE=LGPL-2.1-or-later"
+          Add-Content -Path $env:GITHUB_ENV -Value "FONGMI_FFMPEG_SOURCE_URL=https://github.com/FFmpeg/FFmpeg/tree/946272b79"
+
       - name: Type check
         run: npm run typecheck
 
       - name: Unit and structure tests
         run: npm test
 
-      - name: Build Windows installer and portable package
-        run: npm run package:win
+      - name: Build Windows installer and portable package with native-libmpv
+        run: npm run package:native
+
+      - name: Verify bundled Windows native runtime
+        env:
+          REQUIRE_SIGNED: "0"
+        run: npm run release:verify:native:current
+
+      - name: Install packaged playback test dependencies
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.54.2
+
+      - name: Run packaged Windows native-libmpv playback test
+        run: npm run e2e:native:packaged
 
       - name: Upload Windows packages
         uses: actions/upload-artifact@v4
@@ -132,7 +193,7 @@ jobs:
           retention-days: 14
 
   build-linux:
-    name: Build Linux packages
+    name: Build Linux native-libmpv packages
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -149,6 +210,33 @@ jobs:
           node-version: "22.13.0"
           cache: npm
 
+      - name: Install Linux native media runtime and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libgl1-mesa-dev libmpv-dev mpv ffmpeg libavcodec-dev patchelf xvfb xauth
+
+      - name: Configure Linux native runtime metadata
+        shell: bash
+        run: |
+          LIBMPV_PATH="$(ldconfig -p | awk '/libmpv\.so/{print $NF; exit}')"
+          if [ -z "$LIBMPV_PATH" ]; then
+            LIBMPV_PATH="$(find /usr/lib /lib -name 'libmpv.so*' \( -type f -o -type l \) -print -quit 2>/dev/null)"
+          fi
+          test -n "$LIBMPV_PATH"
+          test -e "$LIBMPV_PATH"
+
+          MPV_VERSION="$(dpkg-query -W -f='${Version}' libmpv-dev 2>/dev/null || mpv --version | head -n1 | awk '{print $2}')"
+          FFMPEG_VERSION="$(dpkg-query -W -f='${Version}' libavcodec-dev 2>/dev/null || ffmpeg -version | head -n1 | awk '{print $3}')"
+
+          echo "FONGMI_NATIVE_ARCH=x64" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_SOURCE=$LIBMPV_PATH" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_VERSION=${MPV_VERSION:-0.37.0}" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_LICENSE=LGPL-2.1-or-later" >> "$GITHUB_ENV"
+          echo "FONGMI_LIBMPV_SOURCE_URL=https://github.com/mpv-player/mpv" >> "$GITHUB_ENV"
+          echo "FONGMI_FFMPEG_VERSION=${FFMPEG_VERSION:-6.1.1}" >> "$GITHUB_ENV"
+          echo "FONGMI_FFMPEG_LICENSE=LGPL-2.1-or-later" >> "$GITHUB_ENV"
+          echo "FONGMI_FFMPEG_SOURCE_URL=https://ffmpeg.org/releases" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 
@@ -158,8 +246,11 @@ jobs:
       - name: Unit and structure tests
         run: npm test
 
-      - name: Build Linux AppImage and DEB
-        run: npm run package:linux
+      - name: Build Linux AppImage and DEB with native-libmpv
+        run: npm run package:native
+
+      - name: Verify bundled Linux native runtime
+        run: npm run release:verify:native:current
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
@@ -210,8 +301,8 @@ jobs:
             包含以下桌面安装包：
             - macOS Intel x64 DMG（内置 native-libmpv）
             - macOS Apple Silicon arm64 DMG（内置 native-libmpv）
-            - Windows x64 安装版与便携版
-            - Linux x64 AppImage 与 DEB
+            - Windows x64 安装版与便携版（内置 native-libmpv）
+            - Linux x64 AppImage 与 DEB（内置 native-libmpv）
 
             注意：当前 macOS 和 Windows 安装包尚未配置商业代码签名。首次打开时，操作系统可能显示安全确认提示。
           files: release-assets/*

@@ -30,6 +30,11 @@ function addResult(id, title, passed, details = "") {
   results.push({ id, title, passed, details });
 }
 
+function isProtectedPlaybackUrl(value) {
+  return value.startsWith("fongmi-media://")
+    || /^http:\/\/127\.0\.0\.1:\d+\/session\//.test(value);
+}
+
 async function launchApp() {
   const launched = await electron.launch({
     executablePath,
@@ -245,7 +250,7 @@ try {
     mp4.activeEngine === "artplayer"
       && mp4.artVisible
       && !mp4.legacyVisible
-      && mp4.currentSrc.startsWith("fongmi-media://")
+      && isProtectedPlaybackUrl(mp4.currentSrc)
       && mp4.readyState >= 2
       && !mp4.paused
       && mp4.currentTime > 0.15
@@ -272,7 +277,7 @@ try {
     "ArtPlayer 可以通过受控协议播放 HLS",
     hls.activeEngine === "artplayer"
       && hls.artVisible
-      && hls.currentSrc.startsWith("fongmi-media://")
+      && isProtectedPlaybackUrl(hls.currentSrc)
       && hls.readyState >= 2
       && !hls.paused
       && hls.currentTime > 0.15
@@ -292,7 +297,7 @@ try {
       && legacy.activeEngine === "legacy"
       && legacy.legacyVisible
       && !legacy.artVisible
-      && legacy.currentSrc.startsWith("fongmi-media://")
+      && isProtectedPlaybackUrl(legacy.currentSrc)
       && legacy.readyState >= 2
       && !legacy.paused,
     JSON.stringify({ preferences: legacyPreferences, playback: legacy }),

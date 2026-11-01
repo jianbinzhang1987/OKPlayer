@@ -29,6 +29,7 @@ test("ArtPlayer is a fixed local dependency and is loaded on demand", async () =
   assert.ok(container.includes('import("./ArtPlayerHost.vue")'));
   assert.ok(player.includes('import Artplayer from "artplayer"'));
   assert.ok(player.includes('preload: "auto"'));
+  assert.ok(player.includes('fongmi-media:'));
   assert.match(player, /crossOrigin:\s*"anonymous"/);
   assert.doesNotMatch(player, /crossOrigin:\s*"use-credentials"/);
   assert.doesNotMatch(`${container}\n${player}\n${html}`, /cdn\.jsdelivr|unpkg\.com/i);

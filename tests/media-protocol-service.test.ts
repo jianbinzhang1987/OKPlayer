@@ -106,6 +106,78 @@ test("a newer seek range aborts the stale in-flight media request", async () => 
   assert.equal(firstWasAborted, true);
 });
 
+test("simultaneous media range requests do not abort each other", async () => {
+  const sessions = new PlaybackSessionStore();
+  const session = sessions.create({
+    url: "https://cdn.example.com/video.mp4",
+    headers: {},
+    format: "mp4",
+    resolvedBy: "direct",
+  });
+  const service = new MediaProtocolService(sessions, async (_url, init) => {
+    const range = new Headers(init?.headers).get("range") ?? "";
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(new Uint8Array([1]), { status: 206, headers: { "content-range": `${range.replace("=", " ")}/1000` } });
+  });
+
+  const [first, second] = await Promise.all([
+    service.handle(new Request(sessions.playbackUrl(session.id), { headers: { Range: "bytes=0-100" } })),
+    service.handle(new Request(sessions.playbackUrl(session.id), { headers: { Range: "bytes=500-600" } })),
+  ]);
+
+  assert.equal(first.status, 206);
+  assert.equal(second.status, 206);
+});
+
+test("media requests across distinct sessions or resources do not abort each other", async () => {
+  const sessions = new PlaybackSessionStore();
+  const firstSession = sessions.create({ url: "https://cdn.example.com/first.mp4", headers: {}, format: "mp4", resolvedBy: "direct" });
+  const secondSession = sessions.create({ url: "https://cdn.example.com/second.mp4", headers: {}, format: "mp4", resolvedBy: "direct" });
+  let firstAborted = false;
+  const service = new MediaProtocolService(sessions, async (url, init) => {
+    if (url.includes("first")) {
+      return new Promise<Response>((resolve) => {
+        init?.signal?.addEventListener("abort", () => {
+          firstAborted = true;
+        });
+        setTimeout(() => resolve(new Response(new Uint8Array([1]), { status: 206, headers: { "content-range": "bytes 0-0/1000" } })), 25);
+      });
+    }
+    return new Response(new Uint8Array([2]), { status: 206, headers: { "content-range": "bytes 0-0/1000" } });
+  });
+
+  const firstPromise = service.handle(new Request(sessions.playbackUrl(firstSession.id), { headers: { Range: "bytes=0-0" } }));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const secondResponse = await service.handle(new Request(sessions.playbackUrl(secondSession.id), { headers: { Range: "bytes=0-0" } }));
+  const firstResponse = await firstPromise;
+
+  assert.equal(firstResponse.status, 206);
+  assert.equal(secondResponse.status, 206);
+  assert.equal(firstAborted, false);
+});
+
+test("downstream request signal abort directly cancels upstream media fetch", async () => {
+  const sessions = new PlaybackSessionStore();
+  const session = sessions.create({ url: "https://cdn.example.com/video.mp4", headers: {}, format: "mp4", resolvedBy: "direct" });
+  let aborted = false;
+  const service = new MediaProtocolService(sessions, async (_url, init) => {
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    });
+  });
+
+  const controller = new AbortController();
+  const handlePromise = service.handle(new Request(sessions.playbackUrl(session.id), { headers: { Range: "bytes=0-100" }, signal: controller.signal }));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  controller.abort();
+  const response = await handlePromise;
+  assert.equal(response.status, 502);
+  assert.equal(aborted, true);
+});
+
 test("media protocol strips source cache validators from protected range requests", async () => {
   const sessions = new PlaybackSessionStore();
   const session = sessions.create({

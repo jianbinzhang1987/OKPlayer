@@ -57,6 +57,40 @@ int* GlxVisualAttributes() {
   return attributes;
 }
 
+void ApplyX11MousePassThrough(Display* display, ::Window window) {
+  if (!display || !window) return;
+  typedef Bool (*XShapeQueryExtensionFunc)(Display*, int*, int*);
+  typedef void (*XShapeCombineRectanglesFunc)(Display*, ::Window, int, int, int, XRectangle*, int, int, int);
+  static void* xext = []() -> void* {
+    void* handle = dlopen("libXext.so.6", RTLD_LAZY);
+    if (!handle) handle = dlopen("libXext.so", RTLD_LAZY);
+    return handle;
+  }();
+  if (!xext) return;
+  auto queryExtension = reinterpret_cast<XShapeQueryExtensionFunc>(dlsym(xext, "XShapeQueryExtension"));
+  auto combineRectangles = reinterpret_cast<XShapeCombineRectanglesFunc>(dlsym(xext, "XShapeCombineRectangles"));
+  if (!queryExtension || !combineRectangles) return;
+  int eventBase = 0;
+  int errorBase = 0;
+  if (!queryExtension(display, &eventBase, &errorBase)) return;
+  // ShapeInput = 2, ShapeSet = 0: set an empty input bounding region so clicks pass through to parent
+  constexpr int kShapeInput = 2;
+  constexpr int kShapeSet = 0;
+  XRectangle emptyRect{};
+  combineRectangles(display, window, kShapeInput, 0, 0, &emptyRect, 0, kShapeSet, 0);
+}
+
+bool IsWaylandSessionWithoutX11() {
+  const char* waylandDisplay = std::getenv("WAYLAND_DISPLAY");
+  const char* x11Display = std::getenv("DISPLAY");
+  const bool hasWayland = waylandDisplay && *waylandDisplay;
+  const bool hasX11 = x11Display && *x11Display;
+  if (hasWayland && !hasX11) return true;
+  const char* sessionType = std::getenv("XDG_SESSION_TYPE");
+  if (sessionType && std::string(sessionType) == "wayland" && !hasX11) return true;
+  return false;
+}
+
 void* ResolveGlxSymbol(void* /*context*/, const char* name) {
   if (!name) return nullptr;
   void* address = reinterpret_cast<void*>(glXGetProcAddressARB(reinterpret_cast<const GLubyte*>(name)));
@@ -177,6 +211,7 @@ void LinuxRenderThread(LinuxViewState* state) {
   }
 
   XMapWindow(state->display, state->window);
+  ApplyX11MousePassThrough(state->display, state->window);
   XFlush(state->display);
   std::string rendererError;
   const bool initialized = state->attachment.initializeRenderer(
@@ -228,6 +263,7 @@ void LinuxRenderThread(LinuxViewState* state) {
         XMoveResizeWindow(state->display, state->window, x, y,
                           static_cast<unsigned int>(std::max(1, width)),
                           static_cast<unsigned int>(std::max(1, height)));
+        ApplyX11MousePassThrough(state->display, state->window);
         XFlush(state->display);
         redraw = true;
       }
@@ -240,6 +276,7 @@ void LinuxRenderThread(LinuxViewState* state) {
 }
 
 bool CanCreateGlxVisual() {
+  if (IsWaylandSessionWithoutX11()) return false;
   const char* displayName = std::getenv("DISPLAY");
   if (!displayName || !*displayName) return false;
   Display* display = XOpenDisplay(nullptr);
@@ -258,7 +295,16 @@ bool NativeViewRenderSupportedLinux() {
 }
 
 NativeViewResult AttachNativeViewLinux(const NativeViewAttachment& attachment) {
-  if (!NativeViewRenderSupportedLinux()) return {false, 0, "当前 Linux 会话没有可用的 X11/GLX 渲染环境"};
+  if (IsWaylandSessionWithoutX11()) {
+    return {false, 0, "检测到纯 Wayland 会话，应用内 X11 视频嵌入不可用，已自动切换兼容播放模式"};
+  }
+  if (!NativeViewRenderSupportedLinux()) {
+    const char* waylandDisplay = std::getenv("WAYLAND_DISPLAY");
+    if (waylandDisplay && *waylandDisplay) {
+      return {false, 0, "Wayland 环境下缺少可用的 XWayland/GLX 兼容渲染表面"};
+    }
+    return {false, 0, "当前 Linux 会话没有可用的 X11/GLX 渲染环境"};
+  }
   if (!attachment.parentHandle) return {false, 0, "缺少 Linux X11 父窗口句柄"};
   auto* state = new LinuxViewState();
   state->attachment = attachment;

@@ -50,6 +50,56 @@ test("app service binds config search detail and resolve", async () => {
   }
 });
 
+test("point-on-demand and live configurations keep independent active state", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "tv-source-domain-"));
+  const vodA = path.join(dir, "vod-a.json");
+  const vodB = path.join(dir, "vod-b.json");
+  const liveB = path.join(dir, "live-b.json");
+  const inlineLive = (name: string, url: string) => [{
+    name,
+    groups: [{ name: "测试分组", channel: [{ name: `${name}频道`, urls: [url] }] }],
+  }];
+  await writeFile(vodA, JSON.stringify({
+    sites: [{ key: "vod-a", name: "点播 A", type: 1, api: "https://vod-a.example.com/api" }],
+    lives: inlineLive("直播 A", "https://live-a.example.com/a.m3u8"),
+  }));
+  await writeFile(vodB, JSON.stringify({
+    sites: [{ key: "vod-b", name: "点播 B", type: 1, api: "https://vod-b.example.com/api" }],
+    lives: inlineLive("直播随点播 B", "https://live-vod-b.example.com/b.m3u8"),
+  }));
+  await writeFile(liveB, JSON.stringify({
+    sites: [],
+    lives: inlineLive("独立直播 B", "https://live-b.example.com/b.m3u8"),
+  }));
+
+  const service = new AppService(":memory:");
+  try {
+    await service.loadConfig(vodA, "点播配置 A");
+    assert.equal(service.listSites()[0]?.key, "vod-a");
+    assert.equal(service.listLiveSources().length, 0);
+
+    await service.loadLiveConfig(vodA, "直播配置 A");
+    assert.equal(service.listSites()[0]?.key, "vod-a");
+    assert.equal(service.listLiveSources()[0]?.name, "直播 A");
+
+    await service.loadLiveConfig(liveB, "直播配置 B");
+    assert.equal(service.listSites()[0]?.key, "vod-a");
+    assert.equal(service.listLiveSources()[0]?.name, "独立直播 B");
+
+    await service.loadConfig(vodB, "点播配置 B");
+    assert.equal(service.listSites()[0]?.key, "vod-b");
+    assert.equal(service.listLiveSources()[0]?.name, "独立直播 B");
+
+    const configs = service.listConfigs();
+    assert.equal(configs.find((item) => item.url === vodB)?.vodEnabled, true);
+    assert.equal(configs.find((item) => item.url === vodB)?.liveEnabled, false);
+    assert.equal(configs.find((item) => item.url === liveB)?.vodEnabled, false);
+    assert.equal(configs.find((item) => item.url === liveB)?.liveEnabled, true);
+  } finally {
+    service.close();
+  }
+});
+
 test("detail restores the saved config that owns a history source", async () => {
   const fixture = await createFixture();
   const secondConfigPath = path.join(fixture.dir, "second-config.json");

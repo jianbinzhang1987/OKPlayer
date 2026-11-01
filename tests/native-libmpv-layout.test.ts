@@ -40,13 +40,17 @@ test("native libmpv project layout is present and package-aware", async () => {
   assert.ok(binding.includes("native_view_darwin.mm"));
   assert.ok(binding.includes("native_view_win.cc"));
   assert.ok(binding.includes("native_view_linux.cc"));
-  for (const marker of ["node_api.h", "createPlayer", "getBuildInfo", "setVolume", "setMuted", "attachView", "resizeView", "detachView", "renderApiAvailable", "renderReady"]) {
+  for (const marker of ["node_api.h", "createPlayer", "getBuildInfo", "setVolume", "setMuted", "buffering", "cachePercent", "attachView", "resizeView", "detachView", "renderApiAvailable", "renderReady"]) {
     assert.ok(addon.includes(marker), `missing addon marker: ${marker}`);
   }
   for (const marker of ["resources/native", "resources/libmpv", "**/*.node", "**/*.dylib", "**/*.dll", "**/*.so*", "signExts"]) {
     assert.ok(builder.includes(marker), `missing packaging marker: ${marker}`);
   }
   assert.ok(main.includes("preflightNativeLibmpvAddon"));
+  assert.ok(main.includes("rtmp:"));
+  assert.ok(main.includes("rtsp:"));
+  assert.ok(main.includes('session.contentKind === "live"'));
+  assert.ok(main.includes("profile }"));
   assert.ok(loader.includes("nativeLibmpvCandidatePaths"));
   assert.ok(loader.includes("FONGMI_LIBMPV_ADDON"));
   assert.ok(app.includes("libmpv 原生内嵌"));
@@ -57,6 +61,20 @@ test("native libmpv project layout is present and package-aware", async () => {
   assert.ok(loader.includes("hasExplicitNativeLibmpvPaths"));
   assert.ok(loader.includes("FONGMI_LIBMPV_LIBRARY"));
 
+  const nativePlayer = contents[4]!;
+  for (const marker of [
+    'if (live)',
+    'realtime_transport ? "3" : "12"',
+    'realtime_transport ? "32MiB" : "96MiB"',
+    'realtime_transport ? "6" : "20"',
+    '"cache-pause", "yes"',
+    '"cache-pause-initial", "no"',
+    'realtime_transport ? "1" : "2"',
+    '"demuxer-readahead-secs", "60"',
+    '"cache-secs", "300"',
+  ]) {
+    assert.ok(nativePlayer.includes(marker), `missing live cache profile marker: ${marker}`);
+  }
   const dynamicLoader = contents[6]!;
   const renderAbi = contents[7]!;
   const macView = contents[10]!;
@@ -71,9 +89,20 @@ test("native libmpv project layout is present and package-aware", async () => {
   const nativeBuilder = await readFile(new URL("../scripts/build-native-libmpv.mjs", import.meta.url), "utf8");
   const nativePackager = await readFile(new URL("../scripts/package-native-libmpv.mjs", import.meta.url), "utf8");
   const workflow = await readFile(new URL("../.github/workflows/desktop-cross-platform.yml", import.meta.url), "utf8");
+  const releaseWorkflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   assert.ok(dynamicLoader.includes("const char* loader_error = dlerror()"));
   assert.ok(dynamicLoader.includes("selected.is_absolute()"));
   assert.ok(dynamicLoader.includes("Never search the process/global loader paths"));
+  for (const marker of [
+    "GetEnvironmentVariableW",
+    "LoadLibraryExW",
+    "LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR",
+    "LOAD_LIBRARY_SEARCH_DEFAULT_DIRS",
+    "LOAD_WITH_ALTERED_SEARCH_PATH",
+  ]) {
+    assert.ok(dynamicLoader.includes(marker), `missing Windows DLL loading marker: ${marker}`);
+  }
+  assert.ok(dynamicLoader.includes("Win32 error"));
   assert.doesNotMatch(dynamicLoader, /candidates\.emplace_back\("libmpv(?:\.2)?\.dylib"\)/);
   assert.ok(dynamicLoader.includes("Intentionally keep a successfully loaded libmpv resident"));
   for (const marker of ["mpv_render_context_create", "mpv_render_context_update", "mpv_render_context_render", "mpv_render_context_free"]) {
@@ -82,13 +111,13 @@ test("native libmpv project layout is present and package-aware", async () => {
   for (const marker of ["MPV_RENDER_PARAM_OPENGL_INIT_PARAMS", "MPV_RENDER_PARAM_OPENGL_FBO", "MPV_RENDER_PARAM_FLIP_Y"]) {
     assert.ok(renderAbi.includes(marker), `missing render ABI marker: ${marker}`);
   }
-  for (const marker of ["NSOpenGLView", "AttachNativeViewDarwin", "flushBuffer", "backingScaleFactor"]) {
+  for (const marker of ["NSOpenGLView", "AttachNativeViewDarwin", "flushBuffer", "backingScaleFactor", "hitTest:(NSPoint)point", "return nil"]) {
     assert.ok(macView.includes(marker), `missing macOS native view marker: ${marker}`);
   }
-  for (const marker of ["CreateWindowExW", "wglCreateContext", "SwapBuffers", "WindowsRenderThread"]) {
+  for (const marker of ["CreateWindowExW", "wglCreateContext", "SwapBuffers", "WindowsRenderThread", "HTTRANSPARENT", "GetDpiForHwnd", "GetWindowDpiScale"]) {
     assert.ok(windowsView.includes(marker), `missing Windows native view marker: ${marker}`);
   }
-  for (const marker of ["XCreateWindow", "glXCreateContext", "glXSwapBuffers", "LinuxRenderThread"]) {
+  for (const marker of ["XCreateWindow", "glXCreateContext", "glXSwapBuffers", "LinuxRenderThread", "ApplyX11MousePassThrough", "IsWaylandSessionWithoutX11", "XShapeCombineRectangles"]) {
     assert.ok(linuxView.includes(marker), `missing Linux native view marker: ${marker}`);
   }
   for (const marker of ["attachNativePlayerView", "resizeNativePlayerView", "detachNativePlayerView"]) {
@@ -128,6 +157,24 @@ test("native libmpv project layout is present and package-aware", async () => {
   assert.ok(packagedE2e.includes("preparedManifestPathSanitized"));
   assert.ok(workflow.includes("Build native libmpv addon"));
   assert.ok(workflow.includes("libx11-dev"));
+  for (const marker of [
+    "Download pinned Windows libmpv runtime",
+    "FONGMI_LIBMPV_DEPENDENCY_DIRS",
+    "Get-FileHash -Algorithm SHA256",
+    "npm run package:native",
+    "release:verify:native:current",
+    "e2e:native:packaged",
+  ]) {
+    assert.ok(releaseWorkflow.includes(marker), `missing Windows native release marker: ${marker}`);
+  }
+  for (const marker of [
+    "Build Linux native-libmpv packages",
+    "Configure Linux native runtime metadata",
+    "Build Linux AppImage and DEB with native-libmpv",
+    "Verify bundled Linux native runtime",
+  ]) {
+    assert.ok(releaseWorkflow.includes(marker), `missing Linux native release marker: ${marker}`);
+  }
   assert.ok(nativeBuilder.includes('shell: process.platform === "win32"'));
   assert.ok(nativePackager.includes('shell: process.platform === "win32"'));
   assert.ok(loader.includes("process.env.FONGMI_LIBMPV_LIBRARY = libraryPath"));

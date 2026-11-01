@@ -29,6 +29,12 @@ export interface PreparePlaybackInput {
   vodName?: string;
   episodeName?: string;
   playbackMode?: PlaybackMode;
+  directMedia?: {
+    url: string;
+    headers?: Record<string, string>;
+    format?: string;
+    contentKind: "live";
+  };
 }
 
 export interface PreparedPlayback {
@@ -56,14 +62,14 @@ interface PlaybackSniffer {
 }
 
 type PlaybackMediaProbe = typeof probeMediaUrl;
-type NativePlaybackTarget = { url: string; headers?: Record<string, string> };
+type NativePlaybackTarget = { url: string; headers?: Record<string, string>; profile?: "default" | "live" };
 type NativePlaybackTargetResolver = (session: PlaybackSession) => NativePlaybackTarget;
 type WebPlaybackUrlResolver = (session: PlaybackSession) => string;
 
 const PREPARATION_TIMEOUT_MS = 15_000;
 
 interface PlaybackFallbackPlayer {
-  open(url: string, headers?: Record<string, string>): Promise<unknown>;
+  open(url: string, headers?: Record<string, string>, options?: { profile?: "default" | "live" }): Promise<unknown>;
   stop(): Promise<unknown>;
   getBackend?(): string;
 }
@@ -168,7 +174,7 @@ export class DesktopPlaybackService {
     const session = this.sessions.get(sessionId);
     try {
       const target = this.nativePlaybackTarget(session);
-      await this.fallbackPlayer.open(target.url, target.headers);
+      await this.fallbackPlayer.open(target.url, target.headers, { profile: target.profile ?? "default" });
       return { status: "started", backend: this.fallbackPlayer.getBackend?.() ?? "mpv-ipc" };
     } catch (error) {
       throw new PlaybackFailure(
@@ -216,8 +222,9 @@ export class DesktopPlaybackService {
   }
 
   private async resolveMedia(input: PreparePlaybackInput, signal: AbortSignal): Promise<ResolvedMedia> {
+    const directMedia = input.directMedia ? normalizeDirectMedia(input.directMedia) : undefined;
     try {
-      const sourceMedia = await this.source.resolve(input.siteKey, input.flag, input.episodeUrl, signal);
+      const sourceMedia = directMedia ?? await this.source.resolve(input.siteKey, input.flag, input.episodeUrl, signal);
       const resolvedFromLocalPanProxy = isLocalPanProxyUrl(sourceMedia.url);
       const resolvedFromBaiduProxy = isBaiduPanProxyUrl(sourceMedia.url);
       const resolved = unwrapLocalPanProxyMedia(sourceMedia);
@@ -229,7 +236,10 @@ export class DesktopPlaybackService {
       // probe on a pan proxy is ADVISORY: a 206 tells us the container (MKV →
       // mpv directly, no 10s web wait), while any failure leaves the format
       // unknown and the renderer watchdog routes it (web first, then mpv).
-      if (!likelyPlaybackPage && shouldProbeResolvedMedia(resolved, explicitDirectMedia)) {
+      // Live media already goes through the dedicated IPTV line probe and has
+      // its own automatic failover. Running the generic media probe here would
+      // request the same manifest a second time before libmpv can start.
+      if (!likelyPlaybackPage && resolved.contentKind !== "live" && shouldProbeResolvedMedia(resolved, explicitDirectMedia)) {
         if (resolvedFromLocalPanProxy) {
           // A pan proxy lease is trusted and short-lived. The probe is purely
           // advisory: a 206 tells us the container (MKV → mpv directly, no
@@ -309,6 +319,7 @@ export class DesktopPlaybackService {
         throw new Error(`解析结果是网页地址，媒体嗅探失败：${message}`);
       }
     } catch (resolveError) {
+      if (directMedia) throw resolveError;
       if (resolveError instanceof DirectMediaUnavailableError) throw resolveError;
       if (resolveError instanceof PlaybackFailure && ["AUTH_REQUIRED", "AUTH_EXPIRED", "CANCELLED"].includes(resolveError.code)) {
         throw resolveError;
@@ -401,7 +412,7 @@ function isLocalPanProxyUrl(value: string): boolean {
   try {
     const url = new URL(value);
     const local = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
-    const panProxyPath = /\/proxy\/(?:quark|baidu|uc|pan115|pan189|pan139)(?:\/|$)/i.test(url.pathname);
+    const panProxyPath = /\/proxy\/(?:quark|baidu|uc|pan115|pan123|pan189|pan139|guangya|thunder)(?:\/|$)/i.test(url.pathname);
     // A CatVod player response can preserve the proxy's original host before
     // it is rebound to the active local service.  `pst` is CatVod's opaque
     // per-playback session payload, so it is a stronger identity signal than
@@ -482,7 +493,7 @@ function isDefinitiveDirectProbeFailure(result: MediaProbeResult): boolean {
 }
 
 function isPanPlaybackInput(input: Pick<PreparePlaybackInput, "siteKey" | "flag" | "episodeUrl">): boolean {
-  return /夸克|quark|\buc\b|百度|baidu|\b115\b|pan115|天翼|pan189|移动云盘|pan139/i
+  return /夸克|quark|\buc\b|百度|baidu|\b115\b|pan115|123网盘|pan123|(?:^|\s)123(?:原画|极速|超清|无损|\s|$)|天翼|pan189|移动云盘|pan139|光鸭|guangya|迅雷|xunlei|thunder/i
     .test(`${input.siteKey} ${input.flag} ${input.episodeUrl}`);
 }
 
@@ -498,7 +509,30 @@ export function isLikelyPlaybackPage(value: string): boolean {
   }
 }
 
+function normalizeDirectMedia(value: NonNullable<PreparePlaybackInput["directMedia"]>): ResolvedMedia {
+  const parsed = new URL(String(value.url ?? "").trim());
+  if (["udp:", "rtp:"].includes(parsed.protocol)) {
+    throw new Error(`直播线路暂不支持协议：${parsed.protocol}；UDP/RTP 默认关闭，需要显式白名单后才能启用`);
+  }
+  if (!["http:", "https:", "rtmp:", "rtsp:"].includes(parsed.protocol)) throw new Error(`直播线路暂不支持协议：${parsed.protocol}`);
+  if (parsed.username || parsed.password) throw new Error("直播线路 URL 不能包含明文账号密码");
+  const headers = Object.fromEntries(Object.entries(value.headers ?? {}).flatMap(([key, raw]) => {
+    const headerValue = String(raw ?? "").trim();
+    if (!key.trim() || !headerValue || /[\r\n]/.test(`${key}${headerValue}`)) return [];
+    if (/^(?:host|content-length|connection|transfer-encoding)$/i.test(key)) return [];
+    return [[key.trim(), headerValue]];
+  }));
+  return {
+    url: parsed.toString(),
+    headers,
+    ...(value.format?.trim() ? { format: value.format.trim() } : {}),
+    contentKind: "live",
+    resolvedBy: "direct",
+  };
+}
+
 function validatePrepareInput(input: PreparePlaybackInput): void {
   if (!input.siteKey?.trim()) throw new Error("缺少播放源标识");
   if (!input.episodeUrl?.trim()) throw new Error("缺少剧集播放地址");
+  if (input.directMedia && input.directMedia.contentKind !== "live") throw new Error("直连播放只允许直播媒体");
 }

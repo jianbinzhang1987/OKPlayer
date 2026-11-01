@@ -17,10 +17,17 @@ test("renderer exposes multi-provider in-app pan login with automatic polling", 
     "UC 网盘",
     "百度网盘",
     "115 网盘",
+    "123 网盘",
     "天翼云盘",
     "移动云盘",
+    "光鸭网盘",
+    "迅雷网盘",
     "ucCookie",
     "ucToken",
+    "guangya",
+    "requiresCookie",
+    "requiresTvToken",
+    "openCatVodWebsite",
     "startPanLogin",
     "pollPanLogin",
     "schedulePanLoginPoll",
@@ -49,6 +56,10 @@ test("renderer exposes multi-provider in-app pan login with automatic polling", 
   assert.match(source, /window\.setTimeout\(\(\) => void pollPanLogin\(\), 1500\)/);
   assert.match(source, /cancelPanLogin\(panLoginTaskId\.value\)/);
   assert.match(source, /await play\(pending\.flag, pending\.episode, pending\.startPosition\)/);
+  assert.match(source, /completedLoginProvider === "ucCookie" && panNeedsUcTvToken\(panStatuses\.value\.uc\)/);
+  assert.match(source, /startPanLogin\("uc", "ucToken"\)/);
+  assert.match(source, /completedLoginProvider === "ucToken" && panNeedsUcCookie\(panStatuses\.value\.uc\)/);
+  assert.match(source, /startPanLogin\("uc", "ucCookie"\)/);
   assert.match(source, /pendingPanPlayback\.value = null/);
   assert.match(source, /await searchWithTargetSelection/);
 });

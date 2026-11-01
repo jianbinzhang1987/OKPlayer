@@ -14,6 +14,24 @@ export interface EmbeddedPlaybackSession {
   danmakuUrl?: string;
   contentKind?: "vod" | "live";
   startPosition?: number;
+  liveMode?: "live" | "catchup" | "timeshift";
+  timeshiftAvailable?: boolean;
+  programmeStartAt?: number;
+  programmeEndAt?: number;
+  programmeTitle?: string;
+}
+
+export interface PlayerLiveLine {
+  id: string;
+  name: string;
+  status?: string;
+  disabled?: boolean;
+}
+
+export interface PlayerLiveChannel {
+  id: string;
+  name: string;
+  disabled?: boolean;
 }
 
 export interface PlaybackProgress {

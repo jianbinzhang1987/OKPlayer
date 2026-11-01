@@ -58,9 +58,16 @@ export class LocalMediaGateway {
         return;
       }
       const route = parseGatewayRoute(request.url ?? "");
+      const abortController = new AbortController();
+      const onClose = () => {
+        if (!response.writableEnded) abortController.abort();
+      };
+      request.once("close", onClose);
+      response.once("close", onClose);
       const mediaRequest = new Request(this.sessions.playbackUrl(route.sessionId, route.resourceId), {
         method: request.method,
         headers: incomingHeaders(request),
+        signal: abortController.signal,
       });
       const upstream = await this.media.handle(mediaRequest);
       response.writeHead(upstream.status, responseHeaders(upstream.headers));

@@ -32,7 +32,9 @@ test("player service opens media through mpv abstraction", async () => {
   await service.setSpeed(1.5);
   await service.setVolume(65);
   await service.setMuted(true);
-  assert.deepEqual(service.getState(), { position: 42, duration: 100, paused: false, stopped: false, speed: 1.5, volume: 65, muted: true });
+  mock.listeners.get("buffering")?.({ active: true, cachePercent: 37 });
+  mock.listeners.get("video-ready")?.(true);
+  assert.deepEqual(service.getState(), { position: 42, duration: 100, paused: false, stopped: false, speed: 1.5, volume: 65, muted: true, buffering: true, cachePercent: 37, videoReady: true });
   mock.listeners.get("volume")?.(72);
   mock.listeners.get("mute")?.(false);
   assert.equal(service.getState().volume, 72);

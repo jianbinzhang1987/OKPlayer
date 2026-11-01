@@ -73,6 +73,7 @@
     "e2e:player": "node scripts/playwright-player-upgrade-e2e.mjs",
     "e2e:native:libmpv": "node scripts/playwright-native-libmpv-e2e.mjs",
     "e2e:profile:playback": "node --experimental-strip-types scripts/playwright-current-profile-live-playback-e2e.mjs",
+    "e2e:live-player": "npm run build && node scripts/playwright-live-player-controls-e2e.mjs",
     "e2e:native:packaged": "node scripts/playwright-packaged-native-libmpv-e2e.mjs",
     "validate:native:libmpv": "npm run typecheck && npm run audit:native:libmpv && node --experimental-strip-types --test tests/native-libmpv-layout.test.ts tests/native-libmpv-preflight.test.ts && npm run build && npm run e2e:native:libmpv && npm test",
     "validate:native:packaged": "npm run package:native:dir && npm run e2e:native:packaged && npm run e2e:player && npm test",

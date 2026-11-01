@@ -1,6 +1,7 @@
 import path from "node:path";
 import { expandVodConfigs, loadConfigDocument, loadVodConfig, parseVodConfigText } from "./config-loader.ts";
 import { probeMediaUrl } from "./media-probe.ts";
+import { LiveService } from "./live/live-service.ts";
 import type { PlayerResult, ResolvedMedia, SiteConfig, SourceResult, Vod, VodConfig } from "./models.ts";
 import { ProviderManager } from "./provider-manager.ts";
 import { loadProviderReplacements } from "./provider-replacement-registry.ts";
@@ -119,6 +120,7 @@ const CATVOD_CONFIG_SOURCE = "catvod://runtime/config";
 
 export class AppService {
   private config?: VodConfig;
+  private liveConfig?: VodConfig;
   private dynamicSites: SiteConfig[] = [];
   private dynamicConfig?: VodConfig;
   private sources = new Map<string, SourceAdapter>();
@@ -128,11 +130,13 @@ export class AppService {
   private auditStatus: SourceAuditStatus = emptyAuditStatus();
   private readonly providerManager: ProviderManager;
   private readonly adapterFactory: SourceAdapterFactory;
+  private readonly liveService: LiveService;
   readonly storage: SqliteStorage;
 
   constructor(databasePath = path.resolve("fongmi-desktop.sqlite"), adapterFactory = new SourceAdapterFactory()) {
     this.storage = new SqliteStorage(databasePath);
     this.adapterFactory = adapterFactory;
+    this.liveService = new LiveService(() => this.liveConfig, undefined, this.storage, this.storage);
     // A large TVBox configuration can contain hundreds of providers. AppService keeps the
     // adapters in its source map, so the provider cache must not evict and destroy adapters
     // that are still referenced by that map.
@@ -141,7 +145,11 @@ export class AppService {
 
   async loadConfig(source: string, name = "默认配置"): Promise<VodConfig> {
     const document = await loadConfigDocument(source);
-    if (document.kind === "config") return this.activateConfig(source, name, document.config);
+    if (document.kind === "config") {
+      this.saveConfigRecord(source, name, document.config);
+      if (!document.config.sites.length) return document.config;
+      return this.activateVodConfig(source, name, document.config);
+    }
 
     const expanded = await expandVodConfigs(source, { maxDepth: 3, maxConfigs: 100, concurrency: 6 });
     if (expanded.entries.length === 0) {
@@ -149,31 +157,119 @@ export class AppService {
       throw new Error(`多仓配置未找到可用的下级线路${details ? `：${details}` : ""}`);
     }
 
-    const now = Date.now();
-    for (const entry of expanded.entries) {
-      this.storage.saveConfig({ name: entry.name, url: entry.source, enabled: false, updatedAt: now });
+    for (const entry of expanded.entries) this.saveConfigRecord(entry.source, entry.name, entry.config);
+    const firstLive = expanded.entries.find((entry) => (entry.config.lives?.length ?? 0) > 0);
+    const firstVod = expanded.entries.find((entry) => entry.config.sites.length > 0);
+    if (!firstVod) return firstLive?.config ?? expanded.entries[0]!.config;
+    return this.activateVodConfig(firstVod.source, firstVod.name, firstVod.config);
+  }
+
+  async loadLiveConfig(source: string, name = "默认直播配置"): Promise<VodConfig> {
+    const document = await loadConfigDocument(source);
+    if (document.kind === "config") {
+      this.saveConfigRecord(source, name, document.config);
+      if (!document.config.lives?.length) throw new Error("配置中没有发现直播源");
+      return this.activateLiveConfig(source, name, document.config);
     }
-    const first = expanded.entries[0]!;
-    return this.activateConfig(first.source, first.name, first.config);
+
+    const expanded = await expandVodConfigs(source, { maxDepth: 3, maxConfigs: 100, concurrency: 6 });
+    if (expanded.entries.length === 0) {
+      const details = expanded.failures.slice(0, 5).map((item) => `${item.source}：${item.message}`).join("；");
+      throw new Error(`多仓配置未找到可用的下级线路${details ? `：${details}` : ""}`);
+    }
+    for (const entry of expanded.entries) this.saveConfigRecord(entry.source, entry.name, entry.config);
+    const firstLive = expanded.entries.find((entry) => (entry.config.lives?.length ?? 0) > 0);
+    if (!firstLive) throw new Error("配置仓中没有发现直播源");
+    return this.activateLiveConfig(firstLive.source, firstLive.name, firstLive.config);
   }
 
   async loadConfigText(text: string, source: string, name = "默认配置"): Promise<VodConfig> {
-    return this.activateConfig(source, name, parseVodConfigText(text, source));
+    const config = parseVodConfigText(text, source);
+    this.saveConfigRecord(source, name, config);
+    if (!config.sites.length) return config;
+    return this.activateVodConfig(source, name, config);
   }
 
   async restoreActiveConfig(): Promise<VodConfig | undefined> {
-    const source = this.storage.getSetting<string>("activeConfig", "");
-    if (!source) return undefined;
-    const savedName = this.storage.listConfigs().find((record) => record.url === source)?.name ?? "默认配置";
-    try {
-      return await this.loadConfig(source, savedName);
-    } catch {
-      return undefined;
+    const records = this.storage.listConfigs();
+    const vodSource = this.activeVodConfigSource();
+    const liveSource = this.storage.getSetting<string>("activeLiveConfig", "") || vodSource;
+    let restoredVod: VodConfig | undefined;
+
+    if (vodSource) {
+      const savedName = records.find((record) => record.url === vodSource)?.name ?? "默认配置";
+      try {
+        const config = await loadVodConfig(vodSource);
+        if (config.sites.length) restoredVod = await this.activateVodConfig(vodSource, savedName, config);
+      } catch {
+        restoredVod = undefined;
+      }
     }
+
+    if (liveSource) {
+      const savedName = records.find((record) => record.url === liveSource)?.name ?? "默认直播配置";
+      try {
+        const config = liveSource === vodSource && restoredVod ? restoredVod : await loadVodConfig(liveSource);
+        if (config.lives?.length) await this.activateLiveConfig(liveSource, savedName, config);
+      } catch {
+        this.liveConfig = undefined;
+        this.liveService.invalidate();
+      }
+    }
+
+    return restoredVod;
   }
 
   getConfig(): VodConfig | undefined {
     return this.config;
+  }
+
+  listLiveSources() {
+    return this.liveService.listSummaries();
+  }
+
+  loadLiveSources(force = false) {
+    return this.liveService.loadAll(force);
+  }
+
+  loadLiveSource(sourceId: string, force = false) {
+    return this.liveService.loadSource(sourceId, force);
+  }
+
+  loadLiveEpgGuide(sourceId: string, force = false) {
+    return this.liveService.loadEpgGuide(sourceId, force);
+  }
+
+  saveLiveEpgMapping(sourceId: string, liveChannelId: string, epgChannelId: string, epgChannelName?: string) {
+    return this.liveService.saveEpgMapping(sourceId, liveChannelId, epgChannelId, epgChannelName);
+  }
+
+  removeLiveEpgMapping(sourceId: string, liveChannelId: string) {
+    return this.liveService.removeEpgMapping(sourceId, liveChannelId);
+  }
+
+  searchLiveChannels(sourceId: string, query = "", groupId?: string) {
+    return this.liveService.searchChannels(sourceId, query, groupId);
+  }
+
+  getLiveChannel(sourceId: string, channelId: string) {
+    return this.liveService.getChannel(sourceId, channelId);
+  }
+
+  getLiveLine(sourceId: string, channelId: string, lineId?: string) {
+    return this.liveService.getLine(sourceId, channelId, lineId);
+  }
+
+  resolveLiveCatchup(sourceId: string, channelId: string, programme: Parameters<LiveService["resolveCatchup"]>[2], lineId?: string) {
+    return this.liveService.resolveCatchup(sourceId, channelId, programme, lineId);
+  }
+
+  inspectLiveChannel(sourceId: string, channelId: string, force = false, lineId?: string) {
+    return this.liveService.inspectChannel(sourceId, channelId, force, lineId);
+  }
+
+  recordLivePlaybackFeedback(feedback: import("./live/live-models.ts").LivePlaybackFeedback) {
+    return this.liveService.recordPlaybackFeedback(feedback);
   }
 
   async setDynamicSites(sites: SiteConfig[]): Promise<void> {
@@ -231,7 +327,24 @@ export class AppService {
   }
 
   listConfigs() {
-    return this.storage.listConfigs();
+    const activeVodSource = this.activeVodConfigSource();
+    const activeLiveSource = this.storage.getSetting<string>("activeLiveConfig", "");
+    const metadata = this.storage.getSetting<Record<string, { siteCount: number; liveSourceCount: number }>>("configMetadata", {});
+    return this.storage.listConfigs().map((record) => ({
+      ...record,
+      enabled: record.url === activeVodSource,
+      vodEnabled: record.url === activeVodSource,
+      liveEnabled: record.url === activeLiveSource,
+      ...(metadata[record.url] ?? {}),
+      ...(record.url === activeVodSource && this.config ? {
+        siteCount: this.config.sites.length,
+        liveSourceCount: this.config.lives?.length ?? 0,
+      } : {}),
+      ...(record.url === activeLiveSource && this.liveConfig ? {
+        liveSourceCount: this.liveConfig.lives?.length ?? 0,
+        siteCount: record.url === activeVodSource ? this.config?.sites.length ?? 0 : this.liveConfig.sites.length,
+      } : {}),
+    }));
   }
 
   getReplacementRegistryStatus() {
@@ -297,31 +410,45 @@ export class AppService {
   }
 
   async deleteConfig(source: string) {
-    const activeSource = this.storage.getSetting<string>("activeConfig", "");
-    const fallbackRecords = activeSource === source
-      ? this.storage.listConfigs().filter((record) => record.url !== source)
-      : [];
+    const activeVodSource = this.activeVodConfigSource();
+    const activeLiveSource = this.storage.getSetting<string>("activeLiveConfig", "");
+    const fallbackRecords = this.storage.listConfigs().filter((record) => record.url !== source);
 
     this.storage.deleteConfig(source);
     this.storage.clearSourceQuality(source);
-    if (activeSource !== source) {
-      await this.rebuildSources();
-      return;
+
+    if (activeVodSource === source) {
+      this.cancelSourceAudit();
+      this.sources.clear();
+      await this.providerManager.clear();
+      this.config = undefined;
+      this.storage.setSetting("activeVodConfig", "");
+      this.storage.setSetting("activeConfig", "");
+      for (const record of fallbackRecords) {
+        try {
+          const config = await loadVodConfig(record.url);
+          if (!config.sites.length) continue;
+          await this.activateVodConfig(record.url, record.name, config);
+          break;
+        } catch {
+          // Try the next saved configuration. A stale or offline entry must not block deletion.
+        }
+      }
     }
 
-    this.cancelSourceAudit();
-    this.sources.clear();
-    await this.providerManager.clear();
-    this.config = undefined;
-    this.storage.setSetting("activeConfig", "");
-
-    for (const record of fallbackRecords) {
-      try {
-        const config = await loadVodConfig(record.url);
-        await this.activateConfig(record.url, record.name, config);
-        return;
-      } catch {
-        // Try the next saved configuration. A stale or offline entry must not block deletion.
+    if (activeLiveSource === source) {
+      this.liveConfig = undefined;
+      this.liveService.invalidate();
+      this.storage.setSetting("activeLiveConfig", "");
+      for (const record of fallbackRecords) {
+        try {
+          const config = await loadVodConfig(record.url);
+          if (!config.lives?.length) continue;
+          await this.activateLiveConfig(record.url, record.name, config);
+          break;
+        } catch {
+          // Try the next saved configuration with live sources.
+        }
       }
     }
   }
@@ -750,7 +877,7 @@ export class AppService {
 
     const loadResults = await mapConcurrent(records, 4, async (record) => {
       try {
-        const activeSource = this.storage.getSetting<string>("activeConfig", "");
+        const activeSource = this.activeVodConfigSource();
         const config = record.url === activeSource && this.config ? this.config : await loadVodConfig(record.url);
         return { record, config } as const;
       } catch (error) {
@@ -818,7 +945,7 @@ export class AppService {
       }
     }
 
-    const activeConfigSource = this.storage.getSetting<string>("activeConfig", "");
+    const activeConfigSource = this.activeVodConfigSource();
     const activeSiteKey = this.storage.getSetting<string>("defaultSite", "");
     const recentSiteKeys = this.storage.getSetting<string[]>("recentSiteKeys", []);
     const rankingKey = (target: GlobalSearchTarget) => target.configSource === activeConfigSource || target.configSource === CATVOD_CONFIG_SOURCE
@@ -971,20 +1098,25 @@ export class AppService {
 
   private searchConfigRecords() {
     const records = this.storage.listConfigs();
-    const activeSource = this.storage.getSetting<string>("activeConfig", "");
+    const activeSource = this.activeVodConfigSource();
     if (this.config && activeSource && !records.some((record) => record.url === activeSource)) {
       records.unshift({ name: "当前配置", url: activeSource, enabled: true, updatedAt: Date.now() });
     }
     return records;
   }
 
+  private activeVodConfigSource(): string {
+    return this.storage.getSetting<string>("activeVodConfig", "")
+      || this.storage.getSetting<string>("activeConfig", "");
+  }
+
   private activeConfigName(): string {
-    const activeSource = this.storage.getSetting<string>("activeConfig", "");
+    const activeSource = this.activeVodConfigSource();
     return this.storage.listConfigs().find((record) => record.url === activeSource)?.name ?? "当前配置";
   }
 
   private currentConfigSource(): string {
-    return this.config?.sourceUrl || this.storage.getSetting<string>("activeConfig", "");
+    return this.config?.sourceUrl || this.activeVodConfigSource();
   }
 
   private allActiveSites(): SiteConfig[] {
@@ -1007,15 +1139,41 @@ export class AppService {
     }
   }
 
-  private async activateConfig(source: string, name: string, config: VodConfig): Promise<VodConfig> {
+  private saveConfigRecord(source: string, name: string, config: VodConfig): void {
+    this.storage.saveConfig({
+      name,
+      url: source,
+      enabled: source === this.activeVodConfigSource(),
+      updatedAt: Date.now(),
+    });
+    const metadata = this.storage.getSetting<Record<string, { siteCount: number; liveSourceCount: number }>>("configMetadata", {});
+    metadata[source] = {
+      siteCount: config.sites.length,
+      liveSourceCount: config.lives?.length ?? 0,
+    };
+    this.storage.setSetting("configMetadata", metadata);
+  }
+
+  private async activateVodConfig(source: string, name: string, config: VodConfig): Promise<VodConfig> {
+    if (!config.sites.length) throw new Error("配置中没有发现点播源");
     this.cancelSourceAudit();
     this.config = config;
     this.sources.clear();
     await this.providerManager.clear();
     for (const site of this.allActiveSites()) this.sources.set(site.key, await this.providerManager.acquire(site));
-    this.storage.saveConfig({ name, url: source, enabled: true, updatedAt: Date.now() });
+    this.saveConfigRecord(source, name, config);
     this.storage.setActiveConfig(source);
+    this.storage.setSetting("activeVodConfig", source);
     this.storage.setSetting("activeConfig", source);
+    return config;
+  }
+
+  private async activateLiveConfig(source: string, name: string, config: VodConfig): Promise<VodConfig> {
+    if (!config.lives?.length) throw new Error("配置中没有发现直播源");
+    this.liveConfig = config;
+    this.liveService.invalidate();
+    this.saveConfigRecord(source, name, config);
+    this.storage.setSetting("activeLiveConfig", source);
     return config;
   }
 
@@ -1064,7 +1222,7 @@ export class AppService {
       }
     }
 
-    const activeSource = this.storage.getSetting<string>("activeConfig", "");
+    const activeSource = this.activeVodConfigSource();
     const savedConfigs = this.storage.listConfigs().filter((record) => record.url !== activeSource);
     const failures: string[] = [];
 
@@ -1074,7 +1232,7 @@ export class AppService {
         const site = config.sites.find((item) => item.key === siteKey);
         if (!site) continue;
         this.assertQualityAvailable(record.url, site);
-        await this.activateConfig(record.url, record.name, config);
+        await this.activateVodConfig(record.url, record.name, config);
         const restored = this.sources.get(siteKey);
         if (restored && this.config) {
           return {

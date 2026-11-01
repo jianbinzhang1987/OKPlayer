@@ -38,3 +38,21 @@ test("http source supports home and category", async () => {
     await fixture.close();
   }
 });
+
+test("http source uses the injected network implementation", async () => {
+  const requests: Array<{ input: string | URL; init?: RequestInit }> = [];
+  const source = new HttpSource(
+    { key: "s", name: "测试源", type: 1, api: "https://example.com/api" },
+    async (input, init) => {
+      requests.push({ input, init });
+      return new Response(JSON.stringify({ list: [{ vod_id: "1", vod_name: "影片" }] }), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  );
+
+  await source.home();
+
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0]!.input).searchParams.get("filter"), "true");
+});

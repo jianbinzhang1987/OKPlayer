@@ -93,8 +93,8 @@ try {
   const initialAccountText = await accountCards.allTextContents();
   record(
     "CORE-E2E-001",
-    "六网盘账号页区分已登录、失效、未登录和检查失败",
-    await accountCards.count() === 6
+    "九网盘账号页区分已登录、失效、未登录和检查失败",
+    await accountCards.count() === 9
       && initialAccountText.some((text) => text.includes("已登录"))
       && initialAccountText.some((text) => text.includes("登录已失效"))
       && initialAccountText.some((text) => text.includes("未登录"))
@@ -131,11 +131,12 @@ try {
   const ucCard = accountCards.filter({ hasText: "UC 网盘" });
   await ucCard.getByRole("button", { name: "扫码 TV Token" }).click();
   await page.locator(".pan-login-layer").waitFor({ state: "visible", timeout: 5_000 });
+  await ucCard.getByText("待扫描 Cookie").waitFor({ state: "visible", timeout: 8_000 });
   await page.locator(".pan-login-layer").waitFor({ state: "detached", timeout: 8_000 });
   await ucCard.locator("em").filter({ hasText: "已登录" }).waitFor({ state: "visible", timeout: 5_000 });
   record(
     "CORE-E2E-004",
-    "UC TV Token 登录成功后状态与凭据模式同步",
+    "UC Cookie 与 TV Token 两步登录后状态与凭据模式同步",
     (await ucCard.textContent())?.includes("已登录") === true && (await ucCard.textContent())?.includes("TV Token") === true,
     await ucCard.textContent() ?? "",
   );

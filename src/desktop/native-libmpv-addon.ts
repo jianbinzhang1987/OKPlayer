@@ -23,6 +23,9 @@ export interface NativeLibmpvPlayerState {
   volume: number;
   paused: boolean;
   muted: boolean;
+  buffering: boolean;
+  cachePercent: number;
+  videoReady: boolean;
   stopped: boolean;
 }
 
@@ -33,7 +36,7 @@ export interface NativeLibmpvViewResult {
 }
 
 export interface NativeLibmpvPlayerHandle {
-  load(url: string, headers?: Record<string, string>): void;
+  load(url: string, headers?: Record<string, string>, live?: boolean): void;
   play(): void;
   pause(): void;
   stop(): void;
@@ -41,6 +44,12 @@ export interface NativeLibmpvPlayerHandle {
   setSpeed(speed: number): void;
   setVolume(volume: number): void;
   setMuted(muted: boolean): void;
+  setSubtitleTrack?(track: number | string): void;
+  setSubtitleDelay?(seconds: number): void;
+  setSubtitleVisibility?(visible: boolean): void;
+  addSubtitle?(url: string): void;
+  setAudioTrack?(track: number | string): void;
+  setAspectRatio?(ratio: string): void;
   attachView(parentHandle: bigint, x: number, y: number, width: number, height: number): NativeLibmpvViewResult;
   resizeView(x: number, y: number, width: number, height: number): void;
   detachView(): void;

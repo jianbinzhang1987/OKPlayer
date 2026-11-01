@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, net, protocol, safeStorage } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AppService } from "../core/app-service.ts";
@@ -95,6 +96,24 @@ export function createMainWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === "darwin" && app.dock) {
+    const iconCandidates = [
+      path.join(app.getAppPath(), "build", "icon.png"),
+      path.join(process.cwd(), "build", "icon.png"),
+      path.join(currentDirectory, "..", "..", "build", "icon.png"),
+      path.join(currentDirectory, "..", "build", "icon.png"),
+    ];
+    for (const candidate of iconCandidates) {
+      if (fs.existsSync(candidate)) {
+        try {
+          app.dock.setIcon(candidate);
+          break;
+        } catch {
+          // ignore dock icon set error
+        }
+      }
+    }
+  }
   const userData = app.getPath("userData");
   const migration = await migrateLegacyUserData(userData, userDataConfiguration.legacyPaths);
   if (migration.copiedEntries.length || migration.databaseMigrated) {
@@ -110,7 +129,10 @@ app.whenReady().then(async () => {
   catVodClient = new CatVodNodeClient({ baseUrl: () => catVodProcess?.status().baseUrl });
   service = new AppService(
     path.join(userData, DATABASE_FILENAME),
-    new SourceAdapterFactory({ catVodClient }),
+    new SourceAdapterFactory({
+      catVodClient,
+      fetch: (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init),
+    }),
   );
   catVodProcess.setRemoteAccessPolicy(
     service.storage.getSetting<CatVodRemoteAccessPolicy>("catVodRemoteAccessPolicy", "allow"),
@@ -168,9 +190,17 @@ app.whenReady().then(async () => {
     ipcPath: platformRuntime.getMpvIpcEndpoint(),
     platform: platformRuntime.nodePlatform,
   });
-  const playbackController = nativeLibmpvAvailability.available
-    ? new NativeFallbackPlaybackController(new NativeLibmpvController(), mpvIpcController, { allowWindowFallback: false })
-    : new UnavailablePlaybackController(nativeLibmpvAvailability.reason ?? "libmpv 原生内嵌插件不可用");
+  const playbackController = nativeLibmpvAvailability.available && nativeLibmpvPreferenceEnabled
+    ? new NativeFallbackPlaybackController(
+        new NativeLibmpvController(),
+        mpvIpcController,
+        { allowWindowFallback: false },
+      )
+    : new UnavailablePlaybackController(
+        !nativeLibmpvPreferenceEnabled
+          ? "已禁用 libmpv 原生内嵌播放内核"
+          : (nativeLibmpvAvailability.reason ?? "libmpv 原生内嵌插件不可用"),
+      );
   player = new PlayerService(playbackController);
   sniffer = new BrowserSnifferService();
   playbackSessions = new PlaybackSessionStore();
@@ -188,8 +218,12 @@ app.whenReady().then(async () => {
   playback = DesktopPlaybackService.fromAppServices(service, player, sniffer, playbackSessions, (session) => {
     // HLS/DASH manifests contain fongmi-media child URLs today.  Keep their
     // existing path until the gateway owns manifest rewriting as well.
-    if (session.format === "hls" || session.format === "dash") return { url: session.sourceUrl, headers: session.headers };
-    return { url: localMediaGateway!.playbackUrl(session.id) };
+    const profile = session.contentKind === "live" ? "live" as const : "default" as const;
+    const protocolName = new URL(session.sourceUrl).protocol;
+    if (session.format === "hls" || session.format === "dash" || ["rtmp:", "rtsp:"].includes(protocolName)) {
+      return { url: session.sourceUrl, headers: session.headers, profile };
+    }
+    return { url: localMediaGateway!.playbackUrl(session.id), profile };
   }, (session) => {
     // The web engine also consumes media through the loopback HTTP gateway.
     // Chromium's media pipeline is only fully reliable for HTTP(S) sources;

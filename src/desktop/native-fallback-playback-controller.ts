@@ -1,4 +1,4 @@
-import type { NativePlayerViewRect, PlaybackController } from "../core/player-service.ts";
+import type { NativePlayerViewRect, PlaybackController, PlaybackLoadOptions } from "../core/player-service.ts";
 
 export interface NativeFallbackStatus {
   backend: "native-libmpv" | "mpv-ipc";
@@ -107,15 +107,15 @@ export class NativeFallbackPlaybackController implements PlaybackController {
     }
   }
 
-  async load(url: string, headers: Record<string, string> = {}): Promise<unknown> {
-    if (this.active === "fallback") return this.fallbackController.load(url, headers);
+  async load(url: string, headers: Record<string, string> = {}, options: PlaybackLoadOptions = {}): Promise<unknown> {
+    if (this.active === "fallback") return this.fallbackController.load(url, headers, options);
     try {
-      return await this.nativeController.load(url, headers);
+      return await this.nativeController.load(url, headers, options);
     } catch (error) {
       if (!this.allowWindowFallback) await this.rejectInAppFailure(error, "原生播放加载失败");
       await this.switchToFallback(error, "原生播放加载失败");
       await this.fallbackController.start();
-      return this.fallbackController.load(url, headers);
+      return this.fallbackController.load(url, headers, options);
     }
   }
 
@@ -145,6 +145,30 @@ export class NativeFallbackPlaybackController implements PlaybackController {
 
   setMuted(muted: boolean): Promise<unknown> | unknown {
     return this.current().setMuted(muted);
+  }
+
+  setSubtitleTrack(track: number | string): Promise<unknown> | unknown {
+    return this.current().setSubtitleTrack?.(track);
+  }
+
+  setSubtitleDelay(seconds: number): Promise<unknown> | unknown {
+    return this.current().setSubtitleDelay?.(seconds);
+  }
+
+  setSubtitleVisibility(visible: boolean): Promise<unknown> | unknown {
+    return this.current().setSubtitleVisibility?.(visible);
+  }
+
+  addSubtitle(url: string): Promise<unknown> | unknown {
+    return this.current().addSubtitle?.(url);
+  }
+
+  setAudioTrack(track: number | string): Promise<unknown> | unknown {
+    return this.current().setAudioTrack?.(track);
+  }
+
+  setAspectRatio(ratio: string): Promise<unknown> | unknown {
+    return this.current().setAspectRatio?.(ratio);
   }
 
   async attachNativeView(parentHandle: bigint, rect: NativePlayerViewRect) {

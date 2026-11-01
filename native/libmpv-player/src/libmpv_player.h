@@ -17,6 +17,9 @@ struct NativePlayerState {
   double volume = 100;
   bool paused = false;
   bool muted = false;
+  bool buffering = false;
+  double cachePercent = 0;
+  bool videoReady = false;
   bool stopped = true;
 };
 
@@ -25,7 +28,7 @@ class LibmpvPlayer final {
   LibmpvPlayer();
   ~LibmpvPlayer();
 
-  void Load(const std::string& url, const std::unordered_map<std::string, std::string>& headers);
+  void Load(const std::string& url, const std::unordered_map<std::string, std::string>& headers, bool live = false);
   void Play();
   void Pause();
   void Stop();
@@ -33,6 +36,12 @@ class LibmpvPlayer final {
   void SetSpeed(double speed);
   void SetVolume(double volume);
   void SetMuted(bool muted);
+  void SetSubtitleTrack(const std::string& track);
+  void SetSubtitleDelay(double seconds);
+  void SetSubtitleVisibility(bool visible);
+  void AddSubtitle(const std::string& url);
+  void SetAudioTrack(const std::string& track);
+  void SetAspectRatio(const std::string& ratio);
   NativePlayerState GetState() const;
 
   NativeViewResult AttachView(std::uintptr_t parentHandle, int x, int y, int width, int height);

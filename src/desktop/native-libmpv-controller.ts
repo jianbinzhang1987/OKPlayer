@@ -1,4 +1,4 @@
-import type { PlaybackController } from "../core/player-service.ts";
+import type { PlaybackController, PlaybackLoadOptions } from "../core/player-service.ts";
 import {
   createNativeLibmpvPlayer,
   getNativeLibmpvAvailability,
@@ -10,6 +10,7 @@ export class NativeLibmpvController implements PlaybackController {
   private readonly listeners = new Map<string, Set<(value: unknown) => void>>();
   private pollTimer?: ReturnType<typeof setInterval>;
   private lastStopped = true;
+  private lastBuffering = false;
 
   getBackend() {
     return "native-libmpv";
@@ -28,13 +29,14 @@ export class NativeLibmpvController implements PlaybackController {
     this.emitSnapshot();
   }
 
-  load(url: string, headers: Record<string, string> = {}) {
-    this.requirePlayer().load(url, headers);
+  load(url: string, headers: Record<string, string> = {}, options: PlaybackLoadOptions = {}) {
+    this.requirePlayer().load(url, headers, options.profile === "live");
     // libmpv commonly reports `stopped` for one or more snapshots while a
     // newly loaded network stream is still opening.  Treat that as the
     // baseline state; otherwise the first poll manufactures an end-file event
     // and the renderer immediately abandons a visible original-quality frame.
     this.lastStopped = true;
+    this.lastBuffering = false;
     this.emitSnapshot();
   }
 
@@ -78,6 +80,30 @@ export class NativeLibmpvController implements PlaybackController {
     this.emitSnapshot();
   }
 
+  setSubtitleTrack(track: number | string) {
+    this.player?.setSubtitleTrack?.(typeof track === "number" ? String(track) : track);
+  }
+
+  setSubtitleDelay(seconds: number) {
+    this.player?.setSubtitleDelay?.(seconds);
+  }
+
+  setSubtitleVisibility(visible: boolean) {
+    this.player?.setSubtitleVisibility?.(visible);
+  }
+
+  addSubtitle(url: string) {
+    this.player?.addSubtitle?.(url);
+  }
+
+  setAudioTrack(track: number | string) {
+    this.player?.setAudioTrack?.(typeof track === "number" ? String(track) : track);
+  }
+
+  setAspectRatio(ratio: string) {
+    this.player?.setAspectRatio?.(ratio);
+  }
+
   async attachNativeView(parentHandle: bigint, rect: { x: number; y: number; width: number; height: number }) {
     if (process.env.FONGMI_NATIVE_VIEW_FORCE_FAILURE === "1") {
       throw new Error("已按测试开关模拟原生视频视图挂载失败");
@@ -102,6 +128,7 @@ export class NativeLibmpvController implements PlaybackController {
     this.player?.destroy();
     this.player = undefined;
     this.lastStopped = true;
+    this.lastBuffering = false;
     this.emit("exit", { event: "exit" });
   }
 
@@ -137,6 +164,11 @@ export class NativeLibmpvController implements PlaybackController {
     this.emit("pause", state.paused);
     this.emit("volume", state.volume);
     this.emit("mute", state.muted);
+    this.emit("video-ready", state.videoReady);
+    if (state.buffering !== this.lastBuffering) {
+      this.emit("buffering", { active: state.buffering, cachePercent: state.cachePercent });
+      this.lastBuffering = state.buffering;
+    }
     if (state.stopped && !this.lastStopped) this.emit("end-file", { event: "end-file" });
     this.lastStopped = state.stopped;
   }

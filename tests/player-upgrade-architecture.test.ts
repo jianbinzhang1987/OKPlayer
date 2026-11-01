@@ -30,7 +30,9 @@ test("player container supports ArtPlayer and the stable legacy fallback", async
   assert.ok(container.includes('import("./ArtPlayerHost.vue")'));
   assert.ok(container.includes('import EmbeddedPlayer from "./EmbeddedPlayer.vue"'));
   assert.ok(container.includes("activeEngine"));
-  assert.ok(container.includes("activeEngine === 'artplayer'"));
+  assert.ok(container.includes("effectiveWebEngine"));
+  assert.ok(container.includes("effectiveWebEngine === 'artplayer'"));
+  assert.ok(container.includes('props.session.contentKind === "live" ? "legacy"'));
   assert.ok(container.includes("usesNativeEngine"));
   assert.ok(container.includes("NativePlayerHost"));
   assert.ok(container.includes("data-player-engine"));

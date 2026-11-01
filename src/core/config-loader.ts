@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { prepareHttpRequest } from "./http-auth.ts";
 import { parseLooseData } from "./drpy-operation-runtime.ts";
+import { normalizeLiveDefinitions } from "./live/live-config.ts";
 import type { ParseConfig, SiteConfig, VodConfig } from "./models.ts";
 
 export interface ConfigWarehouseEntry {
@@ -240,6 +241,69 @@ async function readText(source: string): Promise<{ text: string; sourceUrl: stri
   return { text: await readFile(fileUrl, "utf8"), sourceUrl: fileUrl.toString() };
 }
 
+function emptyVodConfig(sourceUrl: string, lives: NonNullable<VodConfig["lives"]>): VodConfig {
+  return {
+    sourceUrl,
+    sites: [],
+    lives,
+    parses: [],
+    flags: [],
+    headers: [],
+    proxy: [],
+    rules: [],
+    hosts: [],
+    ads: [],
+  };
+}
+
+function directLiveConfigFromText(text: string, sourceUrl: string): VodConfig | undefined {
+  const source = text.replace(/^\uFEFF/, "").trim();
+  if (!source) return undefined;
+  const baseUrl = new URL(sourceUrl);
+  const externalList = /^#EXTM3U\b/im.test(source)
+    || /#genre#/i.test(source)
+    || /^[^,\r\n]{1,200},\s*(?:https?|rtmp|rtsp|udp|rtp):\/\//im.test(source);
+  if (externalList) {
+    const lives = normalizeLiveDefinitions([{ name: inferDirectLiveName(sourceUrl), url: sourceUrl }], baseUrl);
+    return lives.length ? emptyVodConfig(sourceUrl, lives) : undefined;
+  }
+  if (source.startsWith("[")) {
+    try {
+      if (!Array.isArray(JSON.parse(source))) return undefined;
+      const lives = normalizeLiveDefinitions([{ name: inferDirectLiveName(sourceUrl), url: sourceUrl }], baseUrl);
+      return lives.length ? emptyVodConfig(sourceUrl, lives) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!source.startsWith("{")) return undefined;
+  try {
+    const raw = parseConfigText(source);
+    if (Array.isArray(raw.sites) || Array.isArray(raw.lives) || !Array.isArray(raw.groups)) return undefined;
+    const { groups: _groups, ...metadata } = raw;
+    const lives = normalizeLiveDefinitions([{
+      ...metadata,
+      name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : inferDirectLiveName(sourceUrl),
+      url: sourceUrl,
+    }], baseUrl);
+    return lives.length ? emptyVodConfig(sourceUrl, lives) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferDirectLiveName(sourceUrl: string): string {
+  try {
+    const url = new URL(sourceUrl);
+    const fileName = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "")
+      .replace(/\.(?:m3u8?|txt|json)$/i, "")
+      .trim();
+    return fileName || url.hostname || "IPTV 直播";
+  } catch {
+    return "IPTV 直播";
+  }
+}
+
 function normalizeVodConfig(raw: Record<string, unknown>, sourceUrl: string): VodConfig {
   if (typeof raw.msg === "string" && raw.msg !== "") throw new Error(raw.msg);
   const baseUrl = new URL(sourceUrl);
@@ -247,12 +311,14 @@ function normalizeVodConfig(raw: Record<string, unknown>, sourceUrl: string): Vo
   const sites = (Array.isArray(raw.sites) ? raw.sites : [])
     .map((item) => normalizeSite(item, baseUrl, spider))
     .filter((item): item is SiteConfig => item !== null);
-  if (sites.length === 0) throw new Error("配置中没有可用的 sites");
+  const lives = normalizeLiveDefinitions(raw.lives, baseUrl);
+  if (sites.length === 0 && lives.length === 0) throw new Error("配置中没有可用的 sites 或 lives");
 
   return {
     sourceUrl,
     ...(spider !== undefined ? { spider } : {}),
     sites,
+    ...(lives.length ? { lives } : {}),
     parses: (Array.isArray(raw.parses) ? raw.parses : [])
       .map((item) => normalizeParse(item, baseUrl))
       .filter((item): item is ParseConfig => item !== null),
@@ -266,11 +332,13 @@ function normalizeVodConfig(raw: Record<string, unknown>, sourceUrl: string): Vo
 }
 
 export function parseVodConfigText(text: string, sourceUrl: string): VodConfig {
-  return normalizeVodConfig(parseConfigText(text), sourceUrl);
+  return directLiveConfigFromText(text, sourceUrl) ?? normalizeVodConfig(parseConfigText(text), sourceUrl);
 }
 
 export async function loadConfigDocument(source: string): Promise<LoadedConfigDocument> {
   const { text, sourceUrl } = await readText(source);
+  const directLiveConfig = directLiveConfigFromText(text, sourceUrl);
+  if (directLiveConfig) return { kind: "config", config: directLiveConfig };
   const raw = parseConfigText(text);
   const warehouse = normalizeWarehouse(raw, new URL(sourceUrl), sourceUrl);
   if (warehouse && !Array.isArray(raw.sites)) return { kind: "warehouse", warehouse };

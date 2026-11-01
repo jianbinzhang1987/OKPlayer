@@ -1,10 +1,20 @@
-export type PanProviderId = "quark" | "uc" | "baidu" | "pan115" | "pan189" | "pan139";
-export type PanLoginProviderId = "quark" | "ucCookie" | "ucToken" | "baidu" | "pan115" | "pan189" | "pan139";
+export type PanProviderId = "quark" | "uc" | "baidu" | "pan115" | "pan123" | "pan189" | "pan139" | "guangya" | "thunder";
+export type PanLoginProviderId = "quark" | "ucCookie" | "ucToken" | "baidu" | "pan115" | "pan189" | "pan139" | "guangya";
 export type PanLoginState = "waiting" | "success" | "expired" | "error" | "cancelled";
 export type PanAccountState = "connected" | "expired" | "not-configured" | "unavailable";
 export type PanCredentialMode = "cookie" | "tv-token" | "scan" | "account-password" | "unknown";
 
-export const PAN_PROVIDER_IDS: readonly PanProviderId[] = ["quark", "uc", "baidu", "pan115", "pan189", "pan139"];
+export const PAN_PROVIDER_IDS: readonly PanProviderId[] = [
+  "quark",
+  "uc",
+  "baidu",
+  "pan115",
+  "pan123",
+  "pan189",
+  "pan139",
+  "guangya",
+  "thunder",
+];
 
 export interface PanProviderStatus {
   provider: PanProviderId;
@@ -16,6 +26,11 @@ export interface PanProviderStatus {
   state: string;
   label: string;
   checkedAt: number;
+  ucCookieLogin?: boolean;
+  ucTvTokenLogin?: boolean;
+  ucMember?: boolean;
+  requiresCookie?: boolean;
+  requiresTvToken?: boolean;
 }
 
 export interface PanLoginResult {
@@ -36,8 +51,11 @@ const PROVIDER_NAMES: Record<PanProviderId, string> = {
   uc: "UC 网盘",
   baidu: "百度网盘",
   pan115: "115 网盘",
+  pan123: "123 网盘",
   pan189: "天翼云盘",
   pan139: "移动云盘",
+  guangya: "光鸭网盘",
+  thunder: "迅雷网盘",
 };
 
 export class CatVodAccountService {
@@ -69,7 +87,7 @@ export class CatVodAccountService {
       const raw = asRecord(providers[provider]);
       const configured = raw.configured === true;
       const login = raw.login === true;
-      return {
+      const normalized = {
         provider,
         name: PROVIDER_NAMES[provider],
         configured,
@@ -80,6 +98,9 @@ export class CatVodAccountService {
         label: safeText(raw.label, PROVIDER_NAMES[provider]),
         checkedAt,
       };
+      return provider === "uc"
+        ? { ...normalized, ...normalizeUcStatus(raw, normalized.state, configured, login) }
+        : normalized;
     });
   }
 
@@ -134,10 +155,16 @@ export class CatVodAccountService {
 
   async clear(provider: PanProviderId): Promise<PanProviderStatus> {
     assertProvider(provider);
-    await this.request("/website/api/account/clear", {
-      method: "POST",
-      body: JSON.stringify({ provider }),
-    });
+    try {
+      // Keep the generic endpoint for compatible CatVod builds. Current
+      // runtimes expose provider-specific DELETE routes instead.
+      await this.request("/website/api/account/clear", {
+        method: "POST",
+        body: JSON.stringify({ provider }),
+      });
+    } catch {
+      await this.request(providerClearPath(provider), { method: "DELETE" });
+    }
     const relatedTasks = [...this.activeLoginProviders.entries()]
       .filter(([, loginProvider]) => accountProviderForLogin(loginProvider) === provider)
       .map(([taskId]) => taskId);
@@ -274,9 +301,24 @@ function assertProvider(provider: string): asserts provider is PanProviderId {
 }
 
 function assertLoginProvider(provider: string): asserts provider is PanLoginProviderId {
-  if (!["quark", "ucCookie", "ucToken", "baidu", "pan115", "pan189", "pan139"].includes(provider)) {
+  if (!["quark", "ucCookie", "ucToken", "baidu", "pan115", "pan189", "pan139", "guangya"].includes(provider)) {
     throw new Error("当前网盘暂不支持应用内扫码登录");
   }
+}
+
+function providerClearPath(provider: PanProviderId): string {
+  const paths: Record<PanProviderId, string> = {
+    quark: "/website/api/credential/quark/cookie",
+    uc: "/website/api/uc",
+    baidu: "/website/api/credential/baidu/cookie",
+    pan115: "/website/api/pan115/cookie",
+    pan123: "/website/api/pan123/account",
+    pan189: "/website/api/pan189/account",
+    pan139: "/website/api/pan139/cookie",
+    guangya: "/website/api/guangya/token",
+    thunder: "/website/api/thunder",
+  };
+  return paths[provider];
 }
 
 function normalizeAccountState(value: unknown, configured: boolean, login: boolean): PanAccountState {
@@ -296,6 +338,39 @@ function normalizeCredentialMode(...values: unknown[]): PanCredentialMode {
   if (/账号|密码|password|account/.test(text)) return "account-password";
   if (/扫码|qr|scan/.test(text)) return "scan";
   return "unknown";
+}
+
+function normalizeUcStatus(
+  raw: Record<string, unknown>,
+  state: string,
+  configured: boolean,
+  _login: boolean,
+): Pick<PanProviderStatus, "ucCookieLogin" | "ucTvTokenLogin" | "ucMember" | "requiresCookie" | "requiresTvToken"> {
+  const cookieSegment = state.split(/\s*\/\s*TV Token/i, 1)[0] ?? state;
+  const tvTokenSegment = state.match(/TV Token\s*(.*)$/i)?.[1] ?? "";
+  const cookieUnavailable = /Cookie\s*(?:未配置|已失效|失效|无效|不可用)/i.test(cookieSegment);
+  const ucCookieLogin = raw.ucCookieLogin === true
+    || raw.cookieLogin === true
+    || (configured && /Cookie/i.test(cookieSegment) && !cookieUnavailable);
+  const ucTvTokenLogin = raw.ucTvTokenLogin === true
+    || raw.tvTokenLogin === true
+    || /(?:可用|有效|已登录)/i.test(tvTokenSegment);
+  const membershipText = [
+    cookieSegment,
+    tvTokenSegment,
+    String(raw.memberType ?? ""),
+    String(raw.membership ?? ""),
+  ].join(" ");
+  const ucMember = raw.ucMember === true
+    || raw.member === true
+    || /会员|SUPER[_ -]?VIP|SVIP|VIP/i.test(membershipText);
+  return {
+    ucCookieLogin,
+    ucTvTokenLogin,
+    ucMember,
+    requiresCookie: raw.requiresCookie === true || (!ucCookieLogin && (ucMember || ucTvTokenLogin)),
+    requiresTvToken: raw.requiresTvToken === true || (ucMember && ucCookieLogin && !ucTvTokenLogin),
+  };
 }
 
 function accountProviderForLogin(provider: PanLoginProviderId): PanProviderId {

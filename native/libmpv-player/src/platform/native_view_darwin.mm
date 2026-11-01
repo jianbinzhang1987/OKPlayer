@@ -81,6 +81,15 @@ void RequestDarwinRedraw(void* context) {
   return YES;
 }
 
+- (NSView*)hitTest:(NSPoint)point {
+  (void)point;
+  // The native video surface is render-only. Returning nil lets mouse events
+  // pass through to Electron's web contents even if Cocoa positions this
+  // child view a few points beyond the intended video rectangle. Without this,
+  // the NSOpenGLView can intercept the Back button and playback controls.
+  return nil;
+}
+
 - (BOOL)initializeRendererNow {
   if (_rendererInitialized) return YES;
   if (_rendererShuttingDown || !_attachment.initializeRenderer) return NO;

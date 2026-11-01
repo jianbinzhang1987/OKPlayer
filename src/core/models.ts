@@ -1,3 +1,5 @@
+import type { LiveSourceDefinition } from "./live/live-models.ts";
+
 export type HeadersMap = Record<string, string>;
 
 export interface SourceCategory {
@@ -57,6 +59,7 @@ export interface VodConfig {
   sourceUrl: string;
   spider?: string;
   sites: SiteConfig[];
+  lives?: LiveSourceDefinition[];
   parses: ParseConfig[];
   flags: string[];
   headers: unknown[];

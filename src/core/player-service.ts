@@ -8,6 +8,9 @@ export interface PlayerState {
   speed: number;
   volume: number;
   muted: boolean;
+  buffering: boolean;
+  cachePercent: number;
+  videoReady: boolean;
 }
 
 export interface NativePlayerViewRect {
@@ -17,9 +20,13 @@ export interface NativePlayerViewRect {
   height: number;
 }
 
+export interface PlaybackLoadOptions {
+  profile?: "default" | "live";
+}
+
 export interface PlaybackController {
   start(): Promise<void>;
-  load(url: string, headers?: Record<string, string>): Promise<unknown> | unknown;
+  load(url: string, headers?: Record<string, string>, options?: PlaybackLoadOptions): Promise<unknown> | unknown;
   play(): Promise<unknown> | unknown;
   pause(): Promise<unknown> | unknown;
   stop(): Promise<unknown> | unknown;
@@ -33,13 +40,19 @@ export interface PlaybackController {
   attachNativeView?(parentHandle: bigint, rect: NativePlayerViewRect): Promise<unknown> | unknown;
   resizeNativeView?(rect: NativePlayerViewRect): Promise<unknown> | unknown;
   detachNativeView?(): Promise<unknown> | unknown;
+  setSubtitleTrack?(track: number | string): Promise<unknown> | unknown;
+  setSubtitleDelay?(seconds: number): Promise<unknown> | unknown;
+  setSubtitleVisibility?(visible: boolean): Promise<unknown> | unknown;
+  addSubtitle?(url: string): Promise<unknown> | unknown;
+  setAudioTrack?(track: number | string): Promise<unknown> | unknown;
+  setAspectRatio?(ratio: string): Promise<unknown> | unknown;
   on?(event: string, callback: (value: unknown) => void): unknown;
 }
 
 export class PlayerService {
   private readonly mpv: PlaybackController;
   private readonly listeners = new Set<(state: PlayerState) => void>();
-  private state: PlayerState = { position: 0, duration: 0, paused: false, stopped: true, speed: 1, volume: 100, muted: false };
+  private state: PlayerState = { position: 0, duration: 0, paused: false, stopped: true, speed: 1, volume: 100, muted: false, buffering: false, cachePercent: 0, videoReady: false };
 
   constructor(mpv: PlaybackController = new MpvController()) {
     this.mpv = mpv;
@@ -60,14 +73,26 @@ export class PlayerService {
     eventSource.on("mute", (value) => {
       if (typeof value === "boolean") this.patch({ muted: value });
     });
+    eventSource.on("video-ready", (value) => {
+      if (typeof value === "boolean") this.patch({ videoReady: value });
+    });
+    eventSource.on("buffering", (value) => {
+      const payload = value && typeof value === "object" ? value as { active?: unknown; cachePercent?: unknown } : {};
+      if (typeof payload.active !== "boolean") return;
+      const cachePercent = Number(payload.cachePercent);
+      this.patch({
+        buffering: payload.active,
+        cachePercent: Number.isFinite(cachePercent) ? Math.max(0, Math.min(100, cachePercent)) : this.state.cachePercent,
+      });
+    });
     eventSource.on("end-file", () => this.patch({ stopped: true }));
     eventSource.on("exit", () => this.patch({ stopped: true }));
   }
 
-  async open(url: string, headers: Record<string, string> = {}) {
+  async open(url: string, headers: Record<string, string> = {}, options: PlaybackLoadOptions = {}) {
     await this.mpv.start();
-    await this.mpv.load(url, headers);
-    this.patch({ position: 0, duration: 0, paused: false, stopped: false });
+    await this.mpv.load(url, headers, options);
+    this.patch({ position: 0, duration: 0, paused: false, stopped: false, buffering: false, cachePercent: 0, videoReady: false });
     const ipcPath = this.mpv.getIpcPath?.();
     return {
       url,
@@ -111,6 +136,30 @@ export class PlayerService {
   async setMuted(muted: boolean) {
     await this.mpv.setMuted(muted);
     this.patch({ muted });
+  }
+
+  async setSubtitleTrack(track: number | string) {
+    return this.mpv.setSubtitleTrack?.(track);
+  }
+
+  async setSubtitleDelay(seconds: number) {
+    return this.mpv.setSubtitleDelay?.(seconds);
+  }
+
+  async setSubtitleVisibility(visible: boolean) {
+    return this.mpv.setSubtitleVisibility?.(visible);
+  }
+
+  async addSubtitle(url: string) {
+    return this.mpv.addSubtitle?.(url);
+  }
+
+  async setAudioTrack(track: number | string) {
+    return this.mpv.setAudioTrack?.(track);
+  }
+
+  async setAspectRatio(ratio: string) {
+    return this.mpv.setAspectRatio?.(ratio);
   }
 
   getBackend(): string {

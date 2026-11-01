@@ -58,6 +58,42 @@ const errorMessage = ref("");
 const status = ref<"loading" | "playing" | "paused" | "buffering" | "ended" | "error">("loading");
 const currentTime = ref(0);
 const danmakuEnabled = ref(true);
+const alwaysOnTopActive = ref(false);
+const miniModeActive = ref(false);
+
+async function toggleAlwaysOnTop() {
+  const next = !alwaysOnTopActive.value;
+  alwaysOnTopActive.value = Boolean(await window.tvApi.setWindowAlwaysOnTop?.(next).catch(() => false));
+  if (art?.notice) art.notice.show = alwaysOnTopActive.value ? "已开启窗口置顶" : "已取消窗口置顶";
+}
+
+async function toggleMiniMode() {
+  const next = !miniModeActive.value;
+  if (document.pictureInPictureElement) {
+    await document.exitPictureInPicture().catch(() => undefined);
+  }
+  miniModeActive.value = Boolean(await window.tvApi.setWindowMiniMode?.(next).catch(() => false));
+  alwaysOnTopActive.value = miniModeActive.value;
+  if (art?.notice) art.notice.show = miniModeActive.value ? "已进入小窗模式" : "已退出小窗模式";
+  await nextTick();
+  if (art) art.resize();
+  setTimeout(() => { if (art) art.resize(); }, 260);
+}
+
+async function togglePictureInPicture() {
+  if (!art?.video || !document.pictureInPictureEnabled) return;
+  try {
+    if (document.pictureInPictureElement === art.video) {
+      await document.exitPictureInPicture();
+    } else {
+      await art.video.requestPictureInPicture();
+    }
+  } catch {
+    if (art?.notice) art.notice.show = "画中画模式不可用";
+  }
+}
+
+const progressPercent = computed(() => duration.value > 0 ? Math.min(100, Math.max(0, (currentTime.value / duration.value) * 100)) : 0);
 let art: Artplayer | undefined;
 let hls: HlsInstance | undefined;
 let disposed = false;
@@ -70,6 +106,44 @@ let networkRecoveries = 0;
 let mediaRecoveries = 0;
 
 Artplayer.PLAYBACK_RATE = [0.75, 1, 1.25, 1.5, 2];
+
+function isOpaqueMediaUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "fongmi-media:";
+  } catch {
+    return false;
+  }
+}
+
+function videoAttributes(url: string) {
+  // Chromium treats the custom media protocol as an opaque origin. Setting
+  // crossOrigin on that URL changes the request to CORS mode and makes some
+  // protected 206 responses fail before the MP4 metadata is parsed. The
+  // loopback HTTP gateway and ordinary remote URLs still need anonymous CORS.
+  return {
+    preload: "auto" as const,
+    ...(isOpaqueMediaUrl(url) ? {} : { crossOrigin: "anonymous" as const }),
+  };
+}
+
+function mediaErrorMessage(player: Artplayer, error: unknown): string {
+  const eventMessage = error instanceof Error ? error.message.trim() : "";
+  const nativeError = player.video?.error;
+  const nativeMessage = typeof (nativeError as MediaError & { message?: unknown } | null)?.message === "string"
+    ? String((nativeError as MediaError & { message?: unknown }).message).trim()
+    : "";
+  if (eventMessage) return eventMessage;
+  if (nativeMessage) return nativeMessage;
+
+  const codeMessages: Record<number, string> = {
+    [MediaError.MEDIA_ERR_ABORTED]: "媒体加载被中止",
+    [MediaError.MEDIA_ERR_NETWORK]: "媒体网络请求失败",
+    [MediaError.MEDIA_ERR_DECODE]: "媒体解码失败",
+    [MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED]: "媒体格式或地址不受支持",
+  };
+  const code = nativeError?.code;
+  return code && codeMessages[code] ? `${codeMessages[code]}（错误代码 ${code}）` : "未知错误";
+}
 
 function snapshot(): PlaybackProgress {
   const position = Number.isFinite(art?.currentTime) ? Math.max(0, art?.currentTime ?? 0) : 0;
@@ -208,8 +282,17 @@ function bindEvents(player: Artplayer) {
   });
   player.on("video:error", (error) => {
     if (!active()) return;
-    showPlaybackError(`ArtPlayer 媒体加载失败：${error.message || "未知错误"}。可使用高兼容播放器继续播放。`);
+    showPlaybackError(`ArtPlayer 媒体加载失败：${mediaErrorMessage(player, error)}。可使用高兼容播放器继续播放。`);
   });
+  if (player.video) {
+    player.video.addEventListener("enterpictureinpicture", () => {
+      miniModeActive.value = true;
+    });
+    player.video.addEventListener("leavepictureinpicture", () => {
+      miniModeActive.value = false;
+      if (art) art.resize();
+    });
+  }
 }
 
 async function createPlayer() {
@@ -238,6 +321,7 @@ async function createPlayer() {
       setting: true,
       playbackRate: true,
       aspectRatio: true,
+      subtitleOffset: true,
       fullscreen: false,
       fullscreenWeb: false,
       pip: true,
@@ -245,10 +329,7 @@ async function createPlayer() {
       playsInline: true,
       isLive: props.session.contentKind === "live",
       theme: "#0a84ff",
-      moreVideoAttr: {
-        preload: "auto",
-        crossOrigin: "anonymous",
-      },
+      moreVideoAttr: videoAttributes(props.session.playbackUrl),
       ...(props.session.subtitleUrl ? {
         subtitle: {
           url: props.session.subtitleUrl,
@@ -266,7 +347,10 @@ async function createPlayer() {
       } : {}),
       ...(isHls ? {
         customType: {
-          hls: (video, url, instance) => attachHls(video, url, instance, currentGeneration),
+          hls: (video, url, instance) => attachHls(video, url, instance, currentGeneration).catch((error) => {
+            if (disposed || currentGeneration !== generation) return;
+            showPlaybackError(`ArtPlayer HLS 播放引擎加载失败：${error instanceof Error ? error.message : String(error)}。可使用高兼容播放器继续播放。`);
+          }),
         },
       } : {}),
     });
@@ -304,6 +388,8 @@ function useFallback() {
 }
 
 function closePlayer() {
+  if (miniModeActive.value) void window.tvApi.setWindowMiniMode?.(false).catch(() => undefined);
+  if (alwaysOnTopActive.value) void window.tvApi.setWindowAlwaysOnTop?.(false).catch(() => undefined);
   emit("close", snapshot());
 }
 
@@ -332,6 +418,13 @@ async function toggleFullscreen() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) {
+    if (event.key === "Escape") target.blur();
+    else return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  controlsVisible.value = true;
   if (event.key === "Escape" && episodeDrawerOpen.value) {
     event.preventDefault();
     episodeDrawerOpen.value = false;
@@ -340,12 +433,92 @@ function handleKeydown(event: KeyboardEvent) {
   if (event.key === "Escape" && art && !document.fullscreenElement) {
     event.preventDefault();
     closePlayer();
-  } else if (event.key === "PageUp") {
+    return;
+  }
+  if (event.code === "Space") {
+    event.preventDefault();
+    art?.toggle();
+    return;
+  }
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    if (art) art.seek = Math.max(0, (art.currentTime || 0) - 10);
+    return;
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    if (art) art.seek = Math.min(art.duration || 0, (art.currentTime || 0) + 10);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (art) {
+      art.volume = Math.min(1, (art.volume || 0) + 0.05);
+      art.muted = false;
+    }
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (art) art.volume = Math.max(0, (art.volume || 0) - 0.05);
+    return;
+  }
+  if (event.key.toLowerCase() === "m") {
+    event.preventDefault();
+    if (art) art.muted = !art.muted;
+    return;
+  }
+  if (event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    void toggleFullscreen();
+    return;
+  }
+  if (event.key.toLowerCase() === "t") {
+    event.preventDefault();
+    void toggleAlwaysOnTop();
+    return;
+  }
+  if (event.key.toLowerCase() === "p") {
+    event.preventDefault();
+    void togglePictureInPicture();
+    return;
+  }
+  if (event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    if (art) {
+      const order = ["default", "16:9", "4:3"];
+      const nextIdx = (order.indexOf(art.aspectRatio) + 1) % order.length;
+      art.aspectRatio = order[nextIdx];
+    }
+    return;
+  }
+  if (event.key === "[") {
+    event.preventDefault();
+    if (art) {
+      const current = Number(art.subtitleOffset) || 0;
+      const next = Math.round((current - 0.5) * 10) / 10;
+      art.subtitleOffset = next;
+    }
+    return;
+  }
+  if (event.key === "]") {
+    event.preventDefault();
+    if (art) {
+      const current = Number(art.subtitleOffset) || 0;
+      const next = Math.round((current + 0.5) * 10) / 10;
+      art.subtitleOffset = next;
+    }
+    return;
+  }
+  if (event.key === "PageUp") {
     event.preventDefault();
     previousEpisode();
-  } else if (event.key === "PageDown") {
+    return;
+  }
+  if (event.key === "PageDown") {
     event.preventDefault();
     nextEpisode();
+    return;
   }
 }
 
@@ -356,20 +529,28 @@ watch(() => props.defaultSpeed, (value) => {
 });
 
 onMounted(() => {
-  window.addEventListener("keydown", handleKeydown);
+  document.addEventListener("keydown", handleKeydown, true);
+  void window.tvApi.getWindowAlwaysOnTop?.().then((val: boolean) => {
+    alwaysOnTopActive.value = Boolean(val);
+  });
+  void window.tvApi.getWindowMiniMode?.().then((val: boolean) => {
+    miniModeActive.value = Boolean(val);
+  });
   void createPlayer();
 });
 
 onBeforeUnmount(() => {
+  if (miniModeActive.value) void window.tvApi.setWindowMiniMode?.(false).catch(() => undefined);
+  if (alwaysOnTopActive.value) void window.tvApi.setWindowAlwaysOnTop?.(false).catch(() => undefined);
   disposed = true;
   generation += 1;
-  window.removeEventListener("keydown", handleKeydown);
+  document.removeEventListener("keydown", handleKeydown, true);
   destroyPlayer();
 });
 </script>
 
 <template>
-  <section ref="root" class="art-player-host" :class="{ 'controls-hidden': !controlsVisible && !episodeDrawerOpen }" aria-label="ArtPlayer 内置播放器">
+  <section ref="root" class="art-player-host" :class="{ 'controls-hidden': !controlsVisible && !episodeDrawerOpen, 'is-mini-mode': miniModeActive }" aria-label="ArtPlayer 内置播放器">
     <div ref="container" class="art-player-surface"></div>
     <DanmakuOverlay :danmaku-url="session.danmakuUrl" :current-time="currentTime" :enabled="danmakuEnabled" :visible="status !== 'error'" :settings="danmakuSettings" />
 
@@ -383,6 +564,8 @@ onBeforeUnmount(() => {
         <button class="player-header-button" title="下一集（Page Down）" :disabled="!hasNext" @click="nextEpisode"><AppIcon name="forward" :size="18" /></button>
         <button class="player-header-button text-action" :class="{ active: episodeDrawerOpen }" @click="toggleEpisodeDrawer"><AppIcon name="film" :size="17" />选集</button>
         <button v-if="session.danmakuUrl" class="player-header-button text-action" :class="{ active: danmakuEnabled }" @click="danmakuEnabled = !danmakuEnabled">弹幕</button>
+        <button class="player-header-button text-action" :class="{ active: alwaysOnTopActive }" :title="alwaysOnTopActive ? '取消置顶（T）' : '置顶播放（T）'" @click="toggleAlwaysOnTop"><AppIcon name="pin" :size="15" />置顶</button>
+        <button class="player-header-button text-action" :class="{ active: miniModeActive }" :title="miniModeActive ? '退出小窗模式' : '小窗模式播放'" @click="toggleMiniMode">小窗</button>
         <button class="player-header-button text-action" @click="useFallback">高兼容播放</button>
         <button class="player-header-button" title="全屏" @click="toggleFullscreen"><AppIcon name="grid" :size="19" /></button>
         <button class="player-header-button" title="关闭播放器" @click="closePlayer"><AppIcon name="close" :size="20" /></button>
@@ -407,6 +590,20 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </aside>
+
+    <div
+      class="persistent-mini-progress"
+      :class="{ visible: !controlsVisible && !miniModeActive && status !== 'error' }"
+      role="progressbar"
+      :aria-valuenow="Math.round(currentTime)"
+      :aria-valuemin="0"
+      :aria-valuemax="Math.round(duration)"
+    >
+      <div
+        class="persistent-mini-progress-fill"
+        :style="{ width: `${progressPercent}%` }"
+      ></div>
+    </div>
   </section>
 </template>
 
@@ -449,4 +646,25 @@ onBeforeUnmount(() => {
 .episode-drawer-list button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .episode-drawer-list button em { color: #82bdff; font-size: 11px; font-style: normal; }
 @media (max-width: 900px) { .format-chip { display: none; } .episode-drawer { width: min(360px,72vw); } }
+.art-player-host.is-mini-mode .art-player-header { height: 44px; padding: 0 10px; gap: 8px; }
+.art-player-host.is-mini-mode .player-title span,
+.art-player-host.is-mini-mode .format-chip { display: none; }
+.persistent-mini-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.16);
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.persistent-mini-progress.visible {
+  opacity: 1;
+}
+.persistent-mini-progress-fill {
+  height: 100%;
+  background: #0a84ff;
+  transition: width 150ms linear;
+}
 </style>

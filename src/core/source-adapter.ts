@@ -5,6 +5,12 @@ import type { ProviderReplacementInfo } from "./provider-replacement-registry.ts
 
 export type SourceOperation = "init" | "home" | "category" | "search" | "detail" | "player" | "proxy" | "health" | "destroy";
 
+/**
+ * Network implementation used by source adapters. Electron's net.fetch uses
+ * the app session's proxy settings, unlike Node's global fetch.
+ */
+export type SourceFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
 export interface SourceCapabilities {
   home: boolean;
   category: boolean;

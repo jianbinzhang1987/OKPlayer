@@ -76,3 +76,68 @@ test("existing source quality tables migrate to stage-specific metrics", async (
     storage.close();
   }
 });
+
+test("existing live line quality tables migrate buffering and failover metrics", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "fongmi-live-quality-migration-"));
+  const databasePath = path.join(dir, "tv.sqlite");
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    CREATE TABLE live_line_quality (
+      source_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      line_id TEXT NOT NULL,
+      line_name TEXT NOT NULL,
+      state TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      probe_state TEXT NOT NULL,
+      probe_score INTEGER NOT NULL,
+      probe_latency_ms INTEGER,
+      resolution TEXT,
+      bandwidth_kbps INTEGER,
+      segment_verified INTEGER,
+      probe_reason TEXT,
+      last_probe_at INTEGER NOT NULL,
+      playback_success_count INTEGER NOT NULL DEFAULT 0,
+      playback_failure_count INTEGER NOT NULL DEFAULT 0,
+      stable_playback_seconds INTEGER NOT NULL DEFAULT 0,
+      startup_samples INTEGER NOT NULL DEFAULT 0,
+      startup_total_ms INTEGER NOT NULL DEFAULT 0,
+      last_startup_ms INTEGER,
+      last_playback_at INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER NOT NULL DEFAULT 0,
+      last_failure_reason TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (source_id, channel_id, line_id)
+    );
+  `);
+  legacy.close();
+
+  const storage = new SqliteStorage(databasePath);
+  try {
+    storage.recordLiveLinePlayback({
+      sourceId: "live",
+      channelId: "channel",
+      lineId: "line",
+      lineName: "线路",
+      kind: "buffering",
+      bufferingCount: 1,
+      bufferingDurationMs: 2_500,
+      occurredAt: Date.now(),
+    });
+    storage.recordLiveLinePlayback({
+      sourceId: "live",
+      channelId: "channel",
+      lineId: "line",
+      lineName: "线路",
+      kind: "failover-success",
+      occurredAt: Date.now(),
+    });
+    const record = storage.getLiveLineQuality("live", "channel", "line");
+    assert.equal(record?.bufferingCount, 1);
+    assert.equal(record?.bufferingDurationMs, 2_500);
+    assert.equal(record?.failoverSuccessCount, 1);
+    assert.equal(record?.failoverFailureCount, 0);
+  } finally {
+    storage.close();
+  }
+});

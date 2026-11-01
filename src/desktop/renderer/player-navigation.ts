@@ -29,7 +29,7 @@ export interface EpisodeNavigation {
 const DIRECT_MEDIA_PATTERN = /\.(?:m3u8|mp4|m4v|mkv|webm|mov|flv|mp3|aac|m4a|ts)(?:$|[?#])/i;
 const STABLE_LINE_PATTERN = /(?:极速|秒播|直连|默认|稳定|流畅|快速)/i;
 const QUALITY_LINE_PATTERN = /(?:原画|4K|蓝光|超清|杜比|HDR|高码率|无损)/i;
-const PAN_LINE_PATTERN = /(?:夸克|UC|百度|115|天翼|阿里|移动|网盘|云盘)/i;
+const PAN_LINE_PATTERN = /(?:夸克|UC|百度|115|123|天翼|光鸭|迅雷|xunlei|thunder|阿里|移动|网盘|云盘)/i;
 
 export function playbackLineScore(line: NavigationLine, preference: PlaybackLinePreference = "stable"): number {
   if (!line.episodes.length) return -10_000;

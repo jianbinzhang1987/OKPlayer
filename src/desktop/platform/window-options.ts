@@ -18,8 +18,8 @@ export function createMainWindowOptions(
     height: 860,
     minWidth: 1080,
     minHeight: 680,
-    title: "FongMi Desktop",
-    backgroundColor: "#0b0d12",
+    title: "FongMi Cinema",
+    backgroundColor: "#090b10",
     show: false,
     ...(mac ? { titleBarStyle: "hiddenInset" as const } : { autoHideMenuBar: true }),
     webPreferences: {

@@ -1,5 +1,5 @@
 import type { PlayerResult, SiteConfig, SourceResult, Vod } from "./models.ts";
-import { combineSourceSignal, runSourceOperation, STANDARD_CAPABILITIES, type SourceAdapter, type SourceCapabilities } from "./source-adapter.ts";
+import { combineSourceSignal, runSourceOperation, STANDARD_CAPABILITIES, type SourceAdapter, type SourceCapabilities, type SourceFetch } from "./source-adapter.ts";
 import { parseJsonSourceResult, parseXmlSourceResult } from "./vod-parser.ts";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -10,9 +10,11 @@ export class HttpSource implements SourceAdapter {
   readonly runtime = "http" as const;
   readonly supported = true;
   readonly capabilities: SourceCapabilities = { ...STANDARD_CAPABILITIES };
+  private readonly fetcher: SourceFetch;
 
-  constructor(site: SiteConfig) {
+  constructor(site: SiteConfig, fetcher: SourceFetch = (input, init) => fetch(input, init)) {
     this.site = site;
+    this.fetcher = fetcher;
     if (![0, 1].includes(site.type)) {
       throw new Error(`HttpSource 当前仅支持 type=0/1，实际为 type=${site.type}`);
     }
@@ -89,7 +91,7 @@ export class HttpSource implements SourceAdapter {
 
     if ((this.site.ext?.length ?? 0) > 1000) {
       headers["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8";
-      response = await fetch(this.site.api, {
+      response = await this.fetcher(this.site.api, {
         method: "POST",
         headers,
         body: new URLSearchParams(requestParams),
@@ -98,7 +100,7 @@ export class HttpSource implements SourceAdapter {
     } else {
       const url = new URL(this.site.api);
       for (const [key, value] of Object.entries(requestParams)) url.searchParams.set(key, value);
-      response = await fetch(url, {
+      response = await this.fetcher(url, {
         headers,
         signal: requestSignal,
         redirect: "follow",

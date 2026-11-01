@@ -31,9 +31,20 @@ const BLOCKED_UPSTREAM_HEADERS = new Set([
 export type MediaFetch = (input: string, init?: RequestInit) => Promise<Response>;
 export type MediaUpstreamResolver = (url: string, resource: PlaybackResource, session: PlaybackSession) => string;
 
+interface ActiveMediaFetchEntry {
+  controller: AbortController;
+  epoch: number;
+}
+
+interface ActiveMediaFetchGroup {
+  currentEpoch: number;
+  epochScheduled: boolean;
+  entries: Set<ActiveMediaFetchEntry>;
+}
+
 export class MediaProtocolService {
   private registered = false;
-  private readonly activeMediaFetches = new Map<string, AbortController>();
+  private readonly activeMediaFetches = new Map<string, ActiveMediaFetchGroup>();
   private readonly sessions: PlaybackSessionStore;
   private readonly fetchMedia: MediaFetch;
   private readonly resolveUpstream: MediaUpstreamResolver;
@@ -69,13 +80,24 @@ export class MediaProtocolService {
         ? this.beginMediaFetch(`${route.sessionId}:${route.resourceId}`)
         : undefined;
 
+      const onAbort = () => activeFetch?.controller.abort();
+      let signal: AbortSignal | undefined = activeFetch?.controller.signal;
+      if (request.signal) {
+        if (signal) {
+          if (request.signal.aborted) activeFetch?.controller.abort();
+          else request.signal.addEventListener("abort", onAbort, { once: true });
+        } else {
+          signal = request.signal;
+        }
+      }
+
       let response: Response;
       try {
         response = await this.fetchMedia(upstreamUrl, {
           method: request.method,
           headers: buildUpstreamHeaders(session, request.headers),
           redirect: "follow",
-          ...(activeFetch ? { signal: activeFetch.controller.signal } : {}),
+          ...(signal ? { signal } : {}),
         });
         // Only unresolved upstream requests are stale when a new seek starts.
         // Once response headers are available, let the downstream reader own
@@ -84,6 +106,10 @@ export class MediaProtocolService {
       } catch (error) {
         if (activeFetch) this.finishMediaFetch(activeFetch.key, activeFetch.controller);
         throw error;
+      } finally {
+        if (request.signal && signal) {
+          request.signal.removeEventListener("abort", onAbort);
+        }
       }
 
       // No URL or credentials are logged — only the response shape needed to
@@ -108,14 +134,49 @@ export class MediaProtocolService {
   }
 
   private beginMediaFetch(key: string) {
-    this.activeMediaFetches.get(key)?.abort();
+    let group = this.activeMediaFetches.get(key);
+    if (!group) {
+      group = {
+        currentEpoch: 0,
+        epochScheduled: false,
+        entries: new Set<ActiveMediaFetchEntry>(),
+      };
+      this.activeMediaFetches.set(key, group);
+    }
+
+    if (!group.epochScheduled) {
+      group.epochScheduled = true;
+      const targetGroup = group;
+      queueMicrotask(() => {
+        targetGroup.currentEpoch += 1;
+        targetGroup.epochScheduled = false;
+      });
+    }
+
+    // Only abort previous requests from an older epoch (i.e. earlier seek),
+    // preserving simultaneous / concurrent requests launched in the same tick.
+    for (const entry of Array.from(group.entries)) {
+      if (entry.epoch < group.currentEpoch) {
+        entry.controller.abort();
+        group.entries.delete(entry);
+      }
+    }
+
     const controller = new AbortController();
-    this.activeMediaFetches.set(key, controller);
+    group.entries.add({ controller, epoch: group.currentEpoch });
     return { key, controller };
   }
 
   private finishMediaFetch(key: string, controller: AbortController): void {
-    if (this.activeMediaFetches.get(key) === controller) this.activeMediaFetches.delete(key);
+    const group = this.activeMediaFetches.get(key);
+    if (!group) return;
+    for (const entry of Array.from(group.entries)) {
+      if (entry.controller === controller) {
+        group.entries.delete(entry);
+        break;
+      }
+    }
+    if (group.entries.size === 0) this.activeMediaFetches.delete(key);
   }
 
   private countedResponse(response: Response, startedAt: number): Response {

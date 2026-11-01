@@ -53,7 +53,7 @@ test("CatVod account statuses normalize all first-stage pan providers with one r
         data: {
           providers: {
             quark: { configured: true, login: true, state: "已登录", label: "夸克 Cookie" },
-            uc: { configured: true, login: false, state: "TV Token 待刷新", label: "UC Cookie / TV Token" },
+            uc: { configured: true, login: false, state: "Cookie VIP / TV Token 未配置", label: "UC Cookie / TV Token" },
             baidu: { configured: false, login: false, state: "未配置", label: "百度 Cookie" },
             pan115: { configured: false, login: false, state: "未配置", label: "Cookie 或扫码登录" },
             pan189: { configured: false, login: false, state: "未配置", label: "扫码登录 / Cookie / 账号密码" },
@@ -66,13 +66,37 @@ test("CatVod account statuses normalize all first-stage pan providers with one r
 
   const statuses = await service.statuses();
   assert.equal(requestCount, 1);
-  assert.deepEqual(statuses.map((status) => status.provider), ["quark", "uc", "baidu", "pan115", "pan189", "pan139"]);
+  assert.deepEqual(statuses.map((status) => status.provider), ["quark", "uc", "baidu", "pan115", "pan123", "pan189", "pan139", "guangya", "thunder"]);
   assert.equal(statuses.find((status) => status.provider === "uc")?.name, "UC 网盘");
   assert.equal(statuses.find((status) => status.provider === "uc")?.configured, true);
   assert.equal(statuses.find((status) => status.provider === "uc")?.login, false);
   assert.equal(statuses.find((status) => status.provider === "uc")?.accountState, "expired");
   assert.equal(statuses.find((status) => status.provider === "uc")?.credentialMode, "tv-token");
+  assert.equal(statuses.find((status) => status.provider === "uc")?.ucMember, true);
+  assert.equal(statuses.find((status) => status.provider === "uc")?.requiresTvToken, true);
+  assert.equal(statuses.find((status) => status.provider === "uc")?.requiresCookie, false);
   assert.equal(statuses.find((status) => status.provider === "baidu")?.accountState, "not-configured");
+});
+
+test("CatVod account status keeps UC Cookie and TV Token requirements independent", async () => {
+  const service = new CatVodAccountService(
+    () => "http://127.0.0.1:9988",
+    async () => jsonResponse({
+      code: 0,
+      data: {
+        providers: {
+          uc: { configured: true, login: true, state: "Cookie 未配置（普通会员） / TV Token 可用", label: "UC Cookie / TV Token" },
+        },
+      },
+    }),
+  );
+
+  const status = await service.status("uc");
+  assert.equal(status.ucMember, true);
+  assert.equal(status.ucCookieLogin, false);
+  assert.equal(status.ucTvTokenLogin, true);
+  assert.equal(status.requiresCookie, true);
+  assert.equal(status.requiresTvToken, false);
 });
 
 test("CatVod account login starts polls and cancels through fixed local endpoints", async () => {
@@ -133,6 +157,26 @@ test("CatVod account service clears a provider credential through the local acco
   assert.equal(cleared.credentialMode, "unknown");
   assert.equal(cleared.state, "已清除凭据");
   assert.deepEqual(calls, [{ url: "http://127.0.0.1:9988/website/api/account/clear", body: { provider: "uc" } }]);
+});
+
+test("CatVod account service falls back to the runtime-specific clear route", async () => {
+  const calls: string[] = [];
+  const service = new CatVodAccountService(
+    () => "http://127.0.0.1:9988",
+    async (input) => {
+      calls.push(input);
+      return input.endsWith("/account/clear")
+        ? jsonResponse({ code: 1, msg: "接口不存在" }, 404)
+        : jsonResponse({ code: 0, msg: "123 账号密码已清除" });
+    },
+  );
+
+  const cleared = await service.clear("pan123");
+  assert.equal(cleared.provider, "pan123");
+  assert.deepEqual(calls, [
+    "http://127.0.0.1:9988/website/api/account/clear",
+    "http://127.0.0.1:9988/website/api/pan123/account",
+  ]);
 });
 
 test("CatVod account service isolates concurrent providers and rejects mismatched polling", async () => {
@@ -224,7 +268,8 @@ test("CatVod account service accepts UC login modes and rejects unknown provider
 
   assert.equal((await service.start("ucCookie")).provider, "ucCookie");
   assert.equal((await service.start("ucToken")).provider, "ucToken");
-  assert.deepEqual(providers, ["ucCookie", "ucToken"]);
+  assert.equal((await service.start("guangya")).provider, "guangya");
+  assert.deepEqual(providers, ["ucCookie", "ucToken", "guangya"]);
   await assert.rejects(service.start("unknown" as never), /暂不支持/);
 });
 

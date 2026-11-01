@@ -8,7 +8,7 @@ import {
   shouldScheduleCompatibilityFallback,
   type CompatibilityFallbackMode,
 } from "../player/playback-error-policy.ts";
-import type { EmbeddedPlaybackSession, PlaybackProgress, PlayerEpisode } from "../player/player-types.ts";
+import type { EmbeddedPlaybackSession, PlaybackProgress, PlayerEpisode, PlayerLiveChannel, PlayerLiveLine } from "../player/player-types.ts";
 import {
   DEFAULT_DANMAKU_SETTINGS,
   DEFAULT_SUBTITLE_SETTINGS,
@@ -27,6 +27,10 @@ const props = withDefaults(defineProps<{
   currentEpisodeUrl?: string;
   hasPrevious?: boolean;
   hasNext?: boolean;
+  liveLines?: PlayerLiveLine[];
+  currentLiveLineId?: string;
+  liveChannels?: PlayerLiveChannel[];
+  currentLiveChannelId?: string;
   danmakuSettings?: DanmakuPresentationSettings;
   subtitleSettings?: SubtitlePresentationSettings;
 }>(), {
@@ -36,6 +40,10 @@ const props = withDefaults(defineProps<{
   currentEpisodeUrl: "",
   hasPrevious: false,
   hasNext: false,
+  liveLines: () => [],
+  currentLiveLineId: "",
+  liveChannels: () => [],
+  currentLiveChannelId: "",
   danmakuSettings: () => ({ ...DEFAULT_DANMAKU_SETTINGS }),
   subtitleSettings: () => ({ ...DEFAULT_SUBTITLE_SETTINGS }),
 });
@@ -51,6 +59,12 @@ const emit = defineEmits<{
   next: [progress: PlaybackSnapshot];
   ended: [progress: PlaybackSnapshot];
   selectEpisode: [payload: { episodeUrl: string; progress: PlaybackSnapshot }];
+  timeshift: [offsetSeconds: number];
+  goLive: [];
+  selectLiveLine: [lineId: string];
+  selectLiveChannel: [channelId: string];
+  reconnectLive: [];
+  openLiveGuide: [progress: PlaybackSnapshot];
 }>();
 
 const root = ref<HTMLElement>();
@@ -59,12 +73,117 @@ const subtitleTrack = ref<HTMLTrackElement>();
 const status = ref<"loading" | "playing" | "paused" | "buffering" | "ended" | "error">("loading");
 const errorMessage = ref("");
 const speed = ref(props.defaultSpeed ?? 1);
+const volume = ref(1);
+const muted = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
 const playbackEngine = ref<"native" | "hls.js">("native");
 const danmakuEnabled = ref(true);
 const episodeDrawerOpen = ref(false);
 const controlsVisible = ref(true);
+const aspectRatio = ref<"auto" | "16:9" | "4:3" | "stretch">("auto");
+const runtimeSubtitleDelay = ref(Number(props.subtitleSettings?.delaySeconds) || 0);
+const alwaysOnTopActive = ref(false);
+const miniModeActive = ref(false);
+const playerToast = ref("");
+let playerToastTimer: ReturnType<typeof setTimeout> | undefined;
+
+function showPlayerToast(message: string, durationMs = 2000) {
+  playerToast.value = message;
+  if (playerToastTimer) clearTimeout(playerToastTimer);
+  playerToastTimer = setTimeout(() => {
+    playerToast.value = "";
+    playerToastTimer = undefined;
+  }, durationMs);
+}
+
+function changeAspectRatio(ratio?: "auto" | "16:9" | "4:3" | "stretch") {
+  if (ratio) aspectRatio.value = ratio;
+  const labels: Record<string, string> = {
+    auto: "默认比例",
+    "16:9": "16:9",
+    "4:3": "4:3",
+    stretch: "铺满拉伸",
+  };
+  showPlayerToast(`画面比例：${labels[aspectRatio.value] ?? aspectRatio.value}`);
+}
+
+function cycleAudioTrack() {
+  if (hls && hls.audioTracks && hls.audioTracks.length > 1) {
+    const current = Math.max(-1, Number(hls.audioTrack));
+    const nextTrack = (current + 1) % hls.audioTracks.length;
+    hls.audioTrack = nextTrack;
+    const trackName = hls.audioTracks[nextTrack]?.name || `音轨 ${nextTrack + 1}`;
+    showPlayerToast(`已切换音轨：${trackName}`);
+    return;
+  }
+  const element = video.value;
+  const audioTracks = (element as any)?.audioTracks;
+  if (audioTracks && audioTracks.length > 1) {
+    let currentIdx = -1;
+    for (let i = 0; i < audioTracks.length; i++) {
+      if (audioTracks[i].enabled) {
+        currentIdx = i;
+        break;
+      }
+    }
+    const nextIdx = (currentIdx + 1) % audioTracks.length;
+    for (let i = 0; i < audioTracks.length; i++) {
+      audioTracks[i].enabled = (i === nextIdx);
+    }
+    const trackLabel = audioTracks[nextIdx]?.label || `音轨 ${nextIdx + 1}`;
+    showPlayerToast(`已切换音轨：${trackLabel}`);
+    return;
+  }
+  showPlayerToast("当前媒体仅包含单一音轨");
+}
+
+function adjustSubtitleDelay(delta: number) {
+  runtimeSubtitleDelay.value = Math.round((runtimeSubtitleDelay.value + delta) * 10) / 10;
+  if (Object.is(runtimeSubtitleDelay.value, -0)) runtimeSubtitleDelay.value = 0;
+  applySubtitlePreferences(runtimeSubtitleDelay.value);
+  const sign = runtimeSubtitleDelay.value > 0 ? "+" : "";
+  showPlayerToast(`字幕延迟：${sign}${runtimeSubtitleDelay.value.toFixed(1)}s`);
+}
+
+async function toggleAlwaysOnTop() {
+  const next = !alwaysOnTopActive.value;
+  alwaysOnTopActive.value = Boolean(await window.tvApi.setWindowAlwaysOnTop?.(next).catch(() => false));
+  showPlayerToast(alwaysOnTopActive.value ? "已开启窗口置顶" : "已取消窗口置顶");
+}
+
+async function toggleMiniMode() {
+  const next = !miniModeActive.value;
+  if (document.pictureInPictureElement) {
+    await document.exitPictureInPicture().catch(() => undefined);
+  }
+  miniModeActive.value = Boolean(await window.tvApi.setWindowMiniMode?.(next).catch(() => false));
+  alwaysOnTopActive.value = miniModeActive.value;
+  showPlayerToast(miniModeActive.value ? "已进入小窗模式" : "已退出小窗模式");
+}
+
+async function togglePictureInPicture() {
+  if (!video.value || !document.pictureInPictureEnabled) return;
+  try {
+    if (document.pictureInPictureElement === video.value) {
+      await document.exitPictureInPicture();
+    } else {
+      await video.value.requestPictureInPicture();
+    }
+  } catch {
+    showPlayerToast("画中画模式不可用");
+  }
+}
+
+const progressPercent = computed(() => duration.value > 0 ? Math.min(100, Math.max(0, (currentTime.value / duration.value) * 100)) : 0);
+const currentLiveClock = ref("");
+let liveClockTimer: ReturnType<typeof setInterval> | undefined;
+
+function updateLiveClock() {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  currentLiveClock.value = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 let controlsTimer: ReturnType<typeof setTimeout> | undefined;
 let lastSavedAt = 0;
 let disposed = false;
@@ -91,6 +210,18 @@ const WEB_SEEK_DEBOUNCE_MS = 100;
 const WEB_SEEK_RECOVERY_TIMEOUT_MS = 8_000;
 
 const resolvedSubtitleSettings = computed(() => normalizeSubtitleSettings(props.subtitleSettings));
+const isLive = computed(() => props.session.contentKind === "live");
+const liveMode = computed(() => props.session.liveMode ?? "live");
+const isRealtimeLive = computed(() => isLive.value && liveMode.value === "live");
+const isReplay = computed(() => isLive.value && liveMode.value !== "live");
+const liveProgrammeText = computed(() => {
+  if (!isLive.value) return "";
+  if (props.session.programmeTitle) {
+    const ending = props.session.programmeEndAt ? ` · 至 ${formatClock(props.session.programmeEndAt)}` : "";
+    return `${props.session.programmeTitle}${ending}`;
+  }
+  return liveMode.value === "catchup" ? "节目回看" : liveMode.value === "timeshift" ? "直播时移" : "实时直播";
+});
 
 const engineLabel = computed(() => props.session.format === "hls" && playbackEngine.value === "hls.js"
   ? "HLS · MSE"
@@ -107,6 +238,11 @@ const statusText = computed(() => {
   if (status.value === "ended") return "播放完成";
   return "";
 });
+
+function formatClock(value: number) {
+  if (!Number.isFinite(value)) return "--:--";
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
 
 function clearControlsTimer() {
   if (controlsTimer) clearTimeout(controlsTimer);
@@ -398,6 +534,8 @@ async function loadMedia() {
   subtitleCueOrigins = new WeakMap<TextTrackCue, { start: number; end: number }>();
   currentTime.value = Math.max(0, props.session.startPosition ?? 0);
   element.playbackRate = speed.value;
+  element.volume = Math.max(0, Math.min(1, volume.value));
+  element.muted = muted.value;
 
   const isHls = props.session.format.toLowerCase() === "hls";
   if (isHls && !supportsNativeHls(element)) {
@@ -411,12 +549,12 @@ async function loadMedia() {
   await tryAutoPlay(element);
 }
 
-function applySubtitlePreferences() {
+function applySubtitlePreferences(delayOverride?: number) {
   const element = video.value;
   const track = element?.textTracks?.[0];
   if (!track) return;
   track.mode = "showing";
-  const delay = resolvedSubtitleSettings.value.delaySeconds;
+  const delay = typeof delayOverride === "number" ? delayOverride : runtimeSubtitleDelay.value;
   for (const cue of Array.from(track.cues ?? [])) {
     const original = subtitleCueOrigins.get(cue) ?? { start: cue.startTime, end: cue.endTime };
     subtitleCueOrigins.set(cue, original);
@@ -541,6 +679,61 @@ function selectEpisode(episodeUrl: string) {
   emit("selectEpisode", { episodeUrl, progress: snapshot() });
 }
 
+function requestTimeshift(offsetSeconds: number) {
+  if (isRealtimeLive.value && props.session.timeshiftAvailable) emit("timeshift", Math.max(60, Math.floor(offsetSeconds)));
+}
+
+function requestGoLive() {
+  if (isReplay.value) emit("goLive");
+}
+
+function selectLiveLine(event: Event) {
+  const lineId = (event.target as HTMLSelectElement).value;
+  if (lineId && lineId !== props.currentLiveLineId) emit("selectLiveLine", lineId);
+}
+
+function selectLiveChannel(event: Event) {
+  const channelId = (event.target as HTMLSelectElement).value;
+  if (channelId && channelId !== props.currentLiveChannelId) emit("selectLiveChannel", channelId);
+}
+
+function requestLiveReconnect() {
+  if (isRealtimeLive.value) emit("reconnectLive");
+}
+
+function togglePlayback() {
+  const element = video.value;
+  if (!element) return;
+  if (element.paused) void element.play();
+  else element.pause();
+}
+
+function syncVolumeState() {
+  const element = video.value;
+  if (!element) return;
+  volume.value = Math.max(0, Math.min(1, element.volume));
+  muted.value = element.muted;
+}
+
+function changeVolume() {
+  const element = video.value;
+  if (!element) return;
+  element.volume = Math.max(0, Math.min(1, Number(volume.value) || 0));
+  if (element.volume > 0) element.muted = false;
+  syncVolumeState();
+}
+
+function toggleMute() {
+  const element = video.value;
+  if (!element) return;
+  element.muted = !element.muted;
+  syncVolumeState();
+}
+
+function requestLiveGuide() {
+  if (isLive.value) emit("openLiveGuide", snapshot());
+}
+
 function onPlaybackError() {
   if (playbackEngine.value === "hls.js" && hls) return;
   const code = video.value?.error?.code;
@@ -564,6 +757,8 @@ function retry() {
 }
 
 function closePlayer() {
+  if (miniModeActive.value) void window.tvApi.setWindowMiniMode?.(false).catch(() => undefined);
+  if (alwaysOnTopActive.value) void window.tvApi.setWindowAlwaysOnTop?.(false).catch(() => undefined);
   emit("close", snapshot());
 }
 
@@ -575,13 +770,26 @@ function useFallback() {
 }
 
 async function toggleFullscreen() {
-  if (document.fullscreenElement) await document.exitFullscreen();
-  else await root.value?.requestFullscreen();
+  const element = root.value;
+  if (!element) return;
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+    return;
+  }
+  await element.requestFullscreen();
+  await nextTick();
+  element.focus({ preventScroll: true });
 }
 
 function handleKeydown(event: KeyboardEvent) {
   const element = video.value;
   if (!element) return;
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) {
+    if (event.key === "Escape") target.blur();
+    else return;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
   showControls();
   if (event.key === "Escape" && episodeDrawerOpen.value) {
     event.preventDefault();
@@ -602,13 +810,44 @@ function handleKeydown(event: KeyboardEvent) {
   }
   if (event.key === "ArrowLeft") {
     event.preventDefault();
-    queueKeyboardSeek(-10);
+    if (isRealtimeLive.value) requestTimeshift(5 * 60);
+    else queueKeyboardSeek(-10);
   } else if (event.key === "ArrowRight") {
     event.preventDefault();
-    queueKeyboardSeek(10);
+    if (!isRealtimeLive.value) queueKeyboardSeek(10);
+  } else if (event.key.toLowerCase() === "l" && isReplay.value) {
+    event.preventDefault();
+    requestGoLive();
+  } else if (event.key.toLowerCase() === "m") {
+    event.preventDefault();
+    toggleMute();
+  } else if (event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    void toggleFullscreen();
+  } else if (event.key.toLowerCase() === "t") {
+    event.preventDefault();
+    void toggleAlwaysOnTop();
+  } else if (event.key.toLowerCase() === "p") {
+    event.preventDefault();
+    void togglePictureInPicture();
+  } else if (event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    const order: Array<"auto" | "16:9" | "4:3" | "stretch"> = ["auto", "16:9", "4:3", "stretch"];
+    const nextIdx = (order.indexOf(aspectRatio.value) + 1) % order.length;
+    changeAspectRatio(order[nextIdx]);
+  } else if (event.key.toLowerCase() === "a") {
+    event.preventDefault();
+    cycleAudioTrack();
+  } else if (event.key === "[") {
+    event.preventDefault();
+    adjustSubtitleDelay(-0.5);
+  } else if (event.key === "]") {
+    event.preventDefault();
+    adjustSubtitleDelay(0.5);
   } else if (event.key === "ArrowUp") {
     event.preventDefault();
     element.volume = Math.min(1, element.volume + 0.05);
+    element.muted = false;
   } else if (event.key === "ArrowDown") {
     event.preventDefault();
     element.volume = Math.max(0, element.volume - 0.05);
@@ -624,13 +863,31 @@ function handleKeydown(event: KeyboardEvent) {
 watch(() => [props.session.playbackUrl, props.session.format], () => void loadMedia());
 watch(() => props.session.danmakuUrl, () => { danmakuEnabled.value = true; });
 watch(() => props.subtitleSettings, () => applySubtitlePreferences(), { deep: true });
+watch(() => props.subtitleSettings?.delaySeconds, (delay) => {
+  if (typeof delay === "number") {
+    runtimeSubtitleDelay.value = delay;
+    applySubtitlePreferences(delay);
+  }
+});
 
 onMounted(() => {
-  window.addEventListener("keydown", handleKeydown);
+  document.addEventListener("keydown", handleKeydown, true);
+  void window.tvApi.getWindowAlwaysOnTop?.().then((val: boolean) => {
+    alwaysOnTopActive.value = Boolean(val);
+  });
+  void window.tvApi.getWindowMiniMode?.().then((val: boolean) => {
+    miniModeActive.value = Boolean(val);
+  });
+  updateLiveClock();
+  liveClockTimer = setInterval(updateLiveClock, 1000);
   void loadMedia();
 });
 
 onBeforeUnmount(() => {
+  if (liveClockTimer) clearInterval(liveClockTimer);
+  if (miniModeActive.value) void window.tvApi.setWindowMiniMode?.(false).catch(() => undefined);
+  if (alwaysOnTopActive.value) void window.tvApi.setWindowAlwaysOnTop?.(false).catch(() => undefined);
+  if (playerToastTimer) clearTimeout(playerToastTimer);
   disposed = true;
   loadGeneration += 1;
   clearControlsTimer();
@@ -638,7 +895,7 @@ onBeforeUnmount(() => {
   clearStartupWatchdog();
   clearSeekRecovery();
   disposeHls();
-  window.removeEventListener("keydown", handleKeydown);
+  document.removeEventListener("keydown", handleKeydown, true);
   const element = video.value;
   if (element) {
     element.pause();
@@ -652,34 +909,35 @@ onBeforeUnmount(() => {
   <section
     ref="root"
     class="embedded-player"
-    :class="{ 'controls-hidden': !controlsVisible && !episodeDrawerOpen }"
+    :class="{ 'controls-hidden': !controlsVisible && !episodeDrawerOpen, 'is-mini-mode': miniModeActive }"
     :style="subtitleCssVariables"
     aria-label="内置播放器"
+    tabindex="-1"
     @mousemove="showControls"
     @mouseleave="scheduleControlsHide"
   >
     <header class="embedded-player-header">
       <div class="mac-window-controls-safe-area" aria-hidden="true"></div>
-      <button class="player-header-button player-back-button" title="返回详情" @click="closePlayer">
+      <button class="player-header-button player-back-button" :title="isLive ? '停止播放并返回直播频道' : '返回详情'" @click="closePlayer">
         <AppIcon name="back" :size="21" />
       </button>
       <div class="player-title">
         <strong>{{ session.title }}</strong>
-        <span>{{ session.episode }}</span>
+        <span>{{ isLive ? liveProgrammeText : session.episode }}</span>
       </div>
       <div class="player-header-actions">
         <span class="format-chip">{{ engineLabel }}</span>
-        <button class="player-header-button" title="上一集（Page Up）" :disabled="!hasPrevious" @click="previousEpisode">
+        <button class="player-header-button" :title="isLive ? '上一个频道（Page Up）' : '上一集（Page Up）'" :disabled="!hasPrevious" @click="previousEpisode">
           <AppIcon name="rewind" :size="18" />
         </button>
-        <button class="player-header-button" title="下一集（Page Down）" :disabled="!hasNext" @click="nextEpisode">
+        <button class="player-header-button" :title="isLive ? '下一个频道（Page Down）' : '下一集（Page Down）'" :disabled="!hasNext" @click="nextEpisode">
           <AppIcon name="forward" :size="18" />
         </button>
-        <button class="player-header-button text-action" :class="{ active: episodeDrawerOpen }" @click="toggleEpisodeDrawer">
+        <button v-if="!isLive" class="player-header-button text-action" :class="{ active: episodeDrawerOpen }" @click="toggleEpisodeDrawer">
           <AppIcon name="film" :size="17" />选集
         </button>
-        <button v-if="session.danmakuUrl" class="player-header-button text-action" :class="{ active: danmakuEnabled }" @click="danmakuEnabled = !danmakuEnabled">弹幕</button>
-        <label class="speed-control">
+        <button v-if="!isLive && session.danmakuUrl" class="player-header-button text-action" :class="{ active: danmakuEnabled }" @click="danmakuEnabled = !danmakuEnabled">弹幕</button>
+        <label v-if="!isLive" class="speed-control">
           <span>倍速</span>
           <select v-model.number="speed" @change="changeSpeed">
             <option :value="0.75">0.75×</option>
@@ -689,6 +947,18 @@ onBeforeUnmount(() => {
             <option :value="2">2.0×</option>
           </select>
         </label>
+        <label class="speed-control">
+          <span>比例</span>
+          <select v-model="aspectRatio" @change="() => changeAspectRatio()">
+            <option value="auto">默认</option>
+            <option value="16:9">16:9</option>
+            <option value="4:3">4:3</option>
+            <option value="stretch">铺满</option>
+          </select>
+        </label>
+        <button class="player-header-button text-action" title="切换音轨（A）" @click="cycleAudioTrack">音轨</button>
+        <button class="player-header-button text-action" :class="{ active: alwaysOnTopActive }" :title="alwaysOnTopActive ? '取消置顶（T）' : '置顶播放（T）'" @click="toggleAlwaysOnTop"><AppIcon name="pin" :size="15" />置顶</button>
+        <button class="player-header-button text-action" :class="{ active: miniModeActive }" :title="miniModeActive ? '退出小窗模式' : '小窗模式播放'" @click="toggleMiniMode">小窗</button>
         <button class="player-header-button text-action" @click="useFallback">高兼容播放</button>
         <button class="player-header-button" title="全屏" @click="toggleFullscreen">
           <AppIcon name="grid" :size="19" />
@@ -699,9 +969,13 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <div v-if="playerToast" class="player-toast" role="status">{{ playerToast }}</div>
+
     <div class="video-stage">
       <video
         ref="video"
+        class="video-element"
+        :class="[`aspect-${aspectRatio}`]"
         controls
         autoplay
         playsinline
@@ -715,8 +989,11 @@ onBeforeUnmount(() => {
         @waiting="status = 'buffering'; showControls()"
         @playing="onPlaying"
         @pause="onPaused"
+        @volumechange="syncVolumeState"
         @ended="onEnded"
         @error="onPlaybackError"
+        @enterpictureinpicture="miniModeActive = true"
+        @leavepictureinpicture="miniModeActive = false"
       >
         <track
           v-if="session.subtitleUrl"
@@ -731,7 +1008,29 @@ onBeforeUnmount(() => {
         />
       </video>
 
-      <DanmakuOverlay :danmaku-url="session.danmakuUrl" :current-time="currentTime" :enabled="danmakuEnabled" :visible="status !== 'error'" :settings="danmakuSettings" />
+      <DanmakuOverlay v-if="!isLive" :danmaku-url="session.danmakuUrl" :current-time="currentTime" :enabled="danmakuEnabled" :visible="status !== 'error'" :settings="danmakuSettings" />
+
+      <div v-if="isLive" class="web-live-controls">
+        <span class="web-live-badge"><i></i>{{ liveMode === 'live' ? '直播中' : liveMode === 'catchup' ? '节目回看' : '直播时移' }} · {{ currentLiveClock }}</span>
+        <button :title="status === 'paused' ? '继续播放（空格）' : '暂停播放（空格）'" @click="togglePlayback"><AppIcon :name="status === 'paused' ? 'play' : 'pause'" :size="15" />{{ status === 'paused' ? '播放' : '暂停' }}</button>
+        <select v-if="isRealtimeLive && liveChannels.length > 1" class="web-live-channel-select" :value="currentLiveChannelId" aria-label="直播频道" @change="selectLiveChannel">
+          <option v-for="channel in liveChannels" :key="channel.id" :value="channel.id" :disabled="channel.disabled">{{ channel.name }}</option>
+        </select>
+        <select v-if="isRealtimeLive && liveLines.length" :value="currentLiveLineId" aria-label="直播线路" @change="selectLiveLine">
+          <option v-for="line in liveLines" :key="line.id" :value="line.id" :disabled="line.disabled">{{ line.name }}{{ line.status ? ` · ${line.status}` : '' }}</option>
+        </select>
+        <button v-if="isRealtimeLive" @click="requestLiveReconnect"><AppIcon name="refresh" :size="15" />刷新直播</button>
+        <template v-if="isRealtimeLive && session.timeshiftAvailable">
+          <button @click="requestTimeshift(5 * 60)">回看 5 分</button>
+          <button @click="requestTimeshift(15 * 60)">回看 15 分</button>
+          <button @click="requestTimeshift(30 * 60)">回看 30 分</button>
+        </template>
+        <button v-if="isLive" @click="requestLiveGuide"><AppIcon name="grid" :size="15" />节目单</button>
+        <button title="全屏切换（F）" @click="toggleFullscreen"><AppIcon name="grid" :size="15" />全屏</button>
+        <button title="静音切换（M）" @click="toggleMute">{{ muted || volume <= 0 ? '静音' : '音量' }}</button>
+        <input class="web-live-volume" type="range" min="0" max="1" step="0.05" v-model.number="volume" :title="`音量 ${Math.round(volume * 100)}%`" @input="changeVolume" />
+        <button v-if="isReplay" class="go-live-button" @click="requestGoLive"><i></i>回到直播</button>
+      </div>
 
       <div v-if="statusText && status !== 'error'" class="player-status">
         <div v-if="status === 'loading' || status === 'buffering'" class="player-spinner"></div>
@@ -773,12 +1072,30 @@ onBeforeUnmount(() => {
 
     <footer class="player-hint">
       <span>空格暂停/继续</span>
-      <span>← → 快退/快进 10 秒</span>
+      <span v-if="isRealtimeLive && session.timeshiftAvailable">← 回看 5 分钟</span>
+      <span v-else-if="!isRealtimeLive">← → 快退/快进 10 秒</span>
       <span>↑ ↓ 调整音量</span>
-      <span>Page Up / Down 切集</span>
+      <span>Page Up / Down {{ isLive ? '切换频道' : '切集' }}</span>
+      <span v-if="isReplay">L 回到直播</span>
       <span>Esc 返回</span>
-      <span class="time-indicator">{{ Math.floor(currentTime) }}s / {{ Math.floor(duration) }}s</span>
+      <span v-if="!isRealtimeLive" class="time-indicator">{{ Math.floor(currentTime) }}s / {{ Math.floor(duration) }}s</span>
+      <span v-else class="time-indicator live-time-indicator"><i></i>LIVE · {{ currentLiveClock }}</span>
     </footer>
+
+    <div
+      class="persistent-mini-progress"
+      :class="{ visible: !controlsVisible && !miniModeActive && status !== 'error' }"
+      role="progressbar"
+      :aria-valuenow="Math.round(currentTime)"
+      :aria-valuemin="0"
+      :aria-valuemax="Math.round(duration)"
+    >
+      <div
+        class="persistent-mini-progress-fill"
+        :class="{ 'is-live': isRealtimeLive }"
+        :style="{ width: isRealtimeLive ? '100%' : `${progressPercent}%` }"
+      ></div>
+    </div>
   </section>
 </template>
 
@@ -792,6 +1109,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   color: #f5f5f7;
   background: #050608;
+  outline: none;
 }
 
 .embedded-player-header {
@@ -945,6 +1263,7 @@ onBeforeUnmount(() => {
   place-items: center;
   overflow: hidden;
   background: #000;
+  container-type: size;
 }
 
 .video-stage video {
@@ -954,12 +1273,105 @@ onBeforeUnmount(() => {
   background: #000;
 }
 
+.video-stage video.aspect-auto {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.video-stage video.aspect-stretch {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+.video-stage video.aspect-16-9 {
+  width: min(100cqw, calc(100cqh * 16 / 9));
+  height: min(100cqh, calc(100cqw * 9 / 16));
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: fill;
+}
+
+.video-stage video.aspect-4-3 {
+  width: min(100cqw, calc(100cqh * 4 / 3));
+  height: min(100cqh, calc(100cqw * 3 / 4));
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: fill;
+}
+
+.player-toast {
+  position: absolute;
+  top: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99;
+  background: rgba(15, 18, 26, 0.94);
+  color: #fff;
+  padding: 8px 20px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+}
+
+.embedded-player.is-mini-mode .embedded-player-header {
+  height: 44px;
+  padding: 0 10px;
+  gap: 8px;
+}
+.embedded-player.is-mini-mode .player-title span,
+.embedded-player.is-mini-mode .format-chip,
+.embedded-player.is-mini-mode .speed-control,
+.embedded-player.is-mini-mode .player-hint {
+  display: none;
+}
+.embedded-player.is-mini-mode .player-toast {
+  top: 48px;
+  font-size: 12px;
+  padding: 5px 12px;
+}
+
 .video-stage video::cue {
   font-size: calc(1em * var(--subtitle-font-scale, 1));
   color: #fff;
   background-color: rgba(0, 0, 0, var(--subtitle-background-opacity, .45));
   text-shadow: 0 2px 5px rgba(0, 0, 0, .9);
 }
+
+.web-live-controls {
+  position: absolute;
+  right: 18px;
+  bottom: calc(var(--native-controls-safe-height) + var(--player-hint-gap) + 48px);
+  left: 18px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px;
+  background: rgba(8,10,14,.82);
+  box-shadow: 0 10px 28px rgba(0,0,0,.24);
+  backdrop-filter: blur(16px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.web-live-controls button,.web-live-controls select { height: 32px; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #fff; background: rgba(255,255,255,.07); padding: 0 10px; }
+.web-live-controls button { display: inline-flex; align-items: center; gap: 6px; }
+.web-live-controls select { min-width: 126px; max-width: 210px; }
+.web-live-volume { width: 92px; accent-color: #0a84ff; }
+.web-live-badge { display: inline-flex; align-items: center; gap: 7px; padding: 0 5px; color: #79dfa0; font-size: 12px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
+.web-live-badge i,.go-live-button i,.live-time-indicator i { width: 7px; height: 7px; border-radius: 50%; background: #ff5252; box-shadow: 0 0 0 3px rgba(255,82,82,.15); }
+.go-live-button { margin-left: auto; }
+.live-time-indicator { display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; color: #79dfa0; font-weight: 700; letter-spacing: .08em; }
 
 .player-status {
   position: absolute;
@@ -1084,7 +1496,8 @@ onBeforeUnmount(() => {
   transform: translateY(-12px);
 }
 
-.controls-hidden .player-hint {
+.controls-hidden .player-hint,
+.controls-hidden .web-live-controls {
   pointer-events: none;
   opacity: 0;
   transform: translateY(10px);
@@ -1206,9 +1619,37 @@ onBeforeUnmount(() => {
   .episode-drawer {
     width: min(360px, 72vw);
   }
+  .web-live-controls { align-content: center; }
+  .web-live-controls button,.web-live-controls select,.web-live-volume { flex: 0 0 auto; }
 }
 
 @keyframes player-spin {
   to { transform: rotate(360deg); }
+}
+
+.persistent-mini-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.16);
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.persistent-mini-progress.visible {
+  opacity: 1;
+}
+
+.persistent-mini-progress-fill {
+  height: 100%;
+  background: #0a84ff;
+  transition: width 150ms linear;
+}
+
+.persistent-mini-progress-fill.is-live {
+  background: linear-gradient(90deg, #ff3b30, #ff453a);
+  box-shadow: 0 0 6px rgba(255, 59, 48, 0.6);
 }
 </style>

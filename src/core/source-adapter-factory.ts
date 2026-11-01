@@ -17,6 +17,7 @@ import {
   UNSUPPORTED_CAPABILITIES,
   type SourceAdapter,
   type SourceCapabilities,
+  type SourceFetch,
   type SourceHealth,
   type SourceOperation,
 } from "./source-adapter.ts";
@@ -26,6 +27,7 @@ import { XbpqAdapter } from "./xbpq-adapter.ts";
 import { XyqAdapter } from "./xyq-adapter.ts";
 
 export interface SourceAdapterFactoryOptions {
+  fetch?: SourceFetch;
   request?: (url: string, options?: RequestInit) => Promise<string>;
   replacements?: ProviderReplacement[] | ProviderReplacementRegistry;
   catVodClient?: CatVodNodeClient;
@@ -138,11 +140,13 @@ class ReplacementSourceAdapter implements SourceAdapter {
 }
 
 export class SourceAdapterFactory {
+  private readonly fetcher: SourceFetch;
   private readonly request: (url: string, options?: RequestInit) => Promise<string>;
   private readonly catVodClient?: CatVodNodeClient;
   private replacementRegistry: ProviderReplacementRegistry;
 
   constructor(options: SourceAdapterFactoryOptions = {}) {
+    this.fetcher = options.fetch ?? ((input, init) => fetch(input, init));
     this.request = options.request ?? (async (url, requestOptions) => {
       const response = await fetch(url, { ...requestOptions, redirect: "follow" });
       if (!response.ok) throw new Error(`JS Spider 请求失败：HTTP ${response.status}`);
@@ -184,7 +188,7 @@ export class SourceAdapterFactory {
 
     switch (capability.runtime) {
       case "http":
-        return new HttpSource(site);
+        return new HttpSource(site, this.fetcher);
       case "javascript":
         return new HybridJavaScriptAdapter(site, this.request);
       case "drpy":

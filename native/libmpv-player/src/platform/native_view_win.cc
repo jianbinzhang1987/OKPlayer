@@ -44,6 +44,28 @@ struct WinViewState {
   int height = 1;
 };
 
+UINT GetDpiForHwnd(HWND hwnd) {
+  using GetDpiForWindowFunc = UINT(WINAPI*)(HWND);
+  static auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFunc>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+  if (getDpiForWindow && hwnd) {
+    UINT dpi = getDpiForWindow(hwnd);
+    if (dpi > 0) return dpi;
+  }
+  HDC hdc = GetDC(hwnd);
+  if (hdc) {
+    int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
+    ReleaseDC(hwnd, hdc);
+    if (dpiX > 0) return static_cast<UINT>(dpiX);
+  }
+  return 96;
+}
+
+double GetWindowDpiScale(HWND hwnd) {
+  const UINT dpi = GetDpiForHwnd(hwnd);
+  return dpi > 0 ? static_cast<double>(dpi) / 96.0 : 1.0;
+}
+
 void* ResolveWglSymbol(void* /*context*/, const char* name) {
   if (!name) return nullptr;
   PROC address = wglGetProcAddress(name);
@@ -84,6 +106,14 @@ LRESULT CALLBACK RenderWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
     SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
   }
   switch (message) {
+    case WM_NCHITTEST:
+      // Return HTTRANSPARENT so mouse hit tests and clicks pass directly
+      // through to Electron's web contents underneath the video HWND.
+      return HTTRANSPARENT;
+    case WM_DPICHANGED:
+    case WM_DISPLAYCHANGE:
+      PostMessageW(window, kResizeMessage, 0, 0);
+      return 0;
     case kRenderMessage:
       RenderWindowsFrame(state);
       return 0;
@@ -107,7 +137,12 @@ LRESULT CALLBACK RenderWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
         width = state->width;
         height = state->height;
       }
-      SetWindowPos(window, nullptr, x, y, width, height,
+      const double scale = GetWindowDpiScale(window ? window : state->parent);
+      const int physicalX = static_cast<int>(std::round(x * scale));
+      const int physicalY = static_cast<int>(std::round(y * scale));
+      const int physicalWidth = std::max(1, static_cast<int>(std::round(width * scale)));
+      const int physicalHeight = std::max(1, static_cast<int>(std::round(height * scale)));
+      SetWindowPos(window, nullptr, physicalX, physicalY, physicalWidth, physicalHeight,
                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_SHOWWINDOW);
       PostMessageW(window, kRenderMessage, 0, 0);
       return 0;
@@ -187,12 +222,18 @@ void WindowsRenderThread(WinViewState* state) {
     return;
   }
 
+  const double scale = GetWindowDpiScale(state->parent);
+  const int physicalX = static_cast<int>(std::round(state->x * scale));
+  const int physicalY = static_cast<int>(std::round(state->y * scale));
+  const int physicalWidth = std::max(1, static_cast<int>(std::round(state->width * scale)));
+  const int physicalHeight = std::max(1, static_cast<int>(std::round(state->height * scale)));
+
   state->window = CreateWindowExW(
     0,
     kWindowClassName,
     L"",
-    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-    state->x, state->y, state->width, state->height,
+    WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+    physicalX, physicalY, physicalWidth, physicalHeight,
     state->parent,
     nullptr,
     GetModuleHandleW(nullptr),

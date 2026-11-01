@@ -30,7 +30,7 @@ function poster(title: string, accent: string, secondary: string) {
     <path d="M0 710c130-72 236-60 345-157 78-69 132-138 255-170" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="3"/>
     <text x="52" y="690" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue" font-size="24" font-weight="600" opacity=".72">FONGMI ORIGINAL</text>
     <text x="52" y="750" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue" font-size="48" font-weight="700">${safeTitle}</text>
-    <text x="52" y="805" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue" font-size="18" opacity=".68">MACOS · FEATURED</text>
+    <text x="52" y="805" fill="#fff" font-family="-apple-system,BlinkMacSystemFont,Helvetica Neue" font-size="18" opacity=".68">DESKTOP · FEATURED</text>
   </svg>`;
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
@@ -84,7 +84,7 @@ function detail(item: MockVod): MockVod {
 }
 
 export function createMockTvApi() {
-  let configs = [{ id: 1, name: "演示配置", url: "https://example.com/fongmi/config.json", enabled: true, updatedAt: Date.now() - 3_600_000 }];
+  let configs = [{ id: 1, name: "演示配置", url: "https://example.com/fongmi/config.json", enabled: true, vodEnabled: true, liveEnabled: true, siteCount: 3, liveSourceCount: 1, updatedAt: Date.now() - 3_600_000 }];
   let favorites = [
     { siteKey: "demo-http", vodId: "2", vodName: "雾中来信", vodPic: baseItems[1]!.vodPic, createdAt: Date.now() - 86_400_000 },
     { siteKey: "demo-http", vodId: "5", vodName: "深蓝计划", vodPic: baseItems[4]!.vodPic, createdAt: Date.now() - 172_800_000 },
@@ -114,29 +114,48 @@ export function createMockTvApi() {
     uc: "UC 网盘",
     baidu: "百度网盘",
     pan115: "115 网盘",
+    pan123: "123 网盘",
     pan189: "天翼云盘",
     pan139: "移动云盘",
+    guangya: "光鸭网盘",
+    thunder: "迅雷网盘",
   };
-  const fixtureBaseUrl = new URLSearchParams(window.location.search).get("fixture")?.replace(/\/$/, "") ?? "";
+  const fixtureBaseUrl = typeof window !== "undefined" && window.location?.search
+    ? new URLSearchParams(window.location.search).get("fixture")?.replace(/\/$/, "") ?? ""
+    : "";
   const panLoggedIn = new Set(["quark", "pan189"]);
   const panConfigured = new Set(["quark", "uc", "pan189"]);
   const panUnavailable = new Set(["pan115"]);
   const panCredentialModes = new Map<string, string>([["quark", "cookie"], ["uc", "tv-token"], ["pan189", "scan"]]);
+  const panUcCookieLogin = new Set<string>();
+  const panUcTvTokenLogin = new Set<string>();
   const panLoginTasks = new Map<string, string>();
   const panStatus = (provider: string) => {
     const unavailable = panUnavailable.has(provider);
-    const login = panLoggedIn.has(provider);
     const configured = panConfigured.has(provider);
+    const ucCookieLogin = provider === "uc" && panUcCookieLogin.has(provider);
+    const ucTvTokenLogin = provider === "uc" && panUcTvTokenLogin.has(provider);
+    const login = provider === "uc" ? ucCookieLogin || ucTvTokenLogin : panLoggedIn.has(provider);
+    const ucMember = provider === "uc" && configured;
+    const requiresCookie = provider === "uc" && !ucCookieLogin && (ucMember || ucTvTokenLogin);
+    const requiresTvToken = provider === "uc" && ucMember && ucCookieLogin && !ucTvTokenLogin;
     return {
       provider,
       name: panNames[provider] ?? provider,
       configured,
       login,
       accountState: unavailable ? "unavailable" : login ? "connected" : configured ? "expired" : "not-configured",
-      credentialMode: panCredentialModes.get(provider) ?? "unknown",
-      state: unavailable ? "状态检查失败（预览）" : login ? "已登录（预览）" : configured ? "登录已失效（预览）" : "未登录",
+      credentialMode: provider === "uc"
+        ? ucTvTokenLogin ? "tv-token" : ucCookieLogin ? "cookie" : "unknown"
+        : panCredentialModes.get(provider) ?? "unknown",
+      state: unavailable
+        ? "状态检查失败（预览）"
+        : provider === "uc"
+          ? `Cookie ${ucCookieLogin ? "VIP" : "未配置"} / TV Token ${ucTvTokenLogin ? "可用" : "未配置"}`
+          : login ? "已登录（预览）" : configured ? "登录已失效（预览）" : "未登录",
       label: `${panNames[provider] ?? provider}预览状态`,
       checkedAt: Date.now(),
+      ...(provider === "uc" ? { ucCookieLogin, ucTvTokenLogin, ucMember, requiresCookie, requiresTvToken } : {}),
     };
   };
   const statusProviderForLogin = (provider: string) => provider === "ucCookie" || provider === "ucToken" ? "uc" : provider;
@@ -177,6 +196,78 @@ export function createMockTvApi() {
     contentKind: "playable",
   });
   const panRootItems = [folder("folder-family", "家庭影音"), panFile("root-video.mp4", "根目录电影.mp4")];
+  const mockLiveSource = {
+    id: "11111111111111111111",
+    name: "预览直播源",
+    sourceUrl: "preview://live",
+    format: "m3u",
+    epgUrls: [],
+    headers: {},
+    boot: true,
+    loadedAt: Date.now(),
+    groups: [
+      {
+        id: "22222222222222222222",
+        sourceId: "11111111111111111111",
+        name: "央视频道",
+        passwordProtected: false,
+        channels: [
+          {
+            id: "33333333333333333333",
+            sourceId: "11111111111111111111",
+            groupId: "22222222222222222222",
+            name: "CCTV-1 综合",
+            number: "1",
+            catchup: { type: "query", source: "utc={utc}&utcend={utcend}" },
+            lines: [
+              { id: "44444444444444444444", name: "高清线路", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", headers: {}, format: "hls", parse: false, priority: 0 },
+              { id: "55555555555555555555", name: "备用线路", url: "https://test-streams.mux.dev/test_001/stream.m3u8", headers: {}, format: "hls", parse: false, priority: 1 },
+            ],
+          },
+          {
+            id: "66666666666666666666",
+            sourceId: "11111111111111111111",
+            groupId: "22222222222222222222",
+            name: "CCTV-13 新闻",
+            number: "13",
+            lines: [{ id: "77777777777777777777", name: "默认线路", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", headers: {}, format: "hls", parse: false, priority: 0 }],
+          },
+        ],
+      },
+    ],
+  };
+  const mockEpgGuide = () => {
+    const now = Date.now();
+    const channels = mockLiveSource.groups.flatMap((group) => group.channels);
+    return {
+      sourceId: mockLiveSource.id,
+      loadedAt: now,
+      expiresAt: now + 3 * 60 * 60 * 1_000,
+      epgSourceCount: 1,
+      epgChannelCount: channels.length,
+      programmeCount: channels.length * 2,
+      matchedChannelCount: channels.length,
+      warnings: [],
+      epgChannels: channels.map((channel) => ({ id: channel.name, names: [channel.name] })),
+      channels: Object.fromEntries(channels.map((channel, index) => [channel.id, {
+        liveChannelId: channel.id,
+        epgChannelId: channel.name,
+        matchMethod: "channel-name",
+        confidence: 90,
+        current: { id: `${channel.id}-current`, channelId: channel.name, startAt: now - 20 * 60_000, endAt: now + 40 * 60_000, title: index === 0 ? "新闻联播特别节目" : "共同关注", categories: ["新闻"] },
+        next: { id: `${channel.id}-next`, channelId: channel.name, startAt: now + 40 * 60_000, endAt: now + 100 * 60_000, title: index === 0 ? "黄金档剧场" : "新闻调查", categories: [] },
+        schedule: [
+          { id: `${channel.id}-current`, channelId: channel.name, startAt: now - 20 * 60_000, endAt: now + 40 * 60_000, title: index === 0 ? "新闻联播特别节目" : "共同关注", categories: ["新闻"] },
+          { id: `${channel.id}-next`, channelId: channel.name, startAt: now + 40 * 60_000, endAt: now + 100 * 60_000, title: index === 0 ? "黄金档剧场" : "新闻调查", categories: [] },
+        ],
+      }])),
+    };
+  };
+  let liveFavorites: any[] = [];
+  let liveRecent: any[] = [];
+  let mockAlwaysOnTop = false;
+  let mockMiniMode = false;
+  const liveCatchupHistory = new Map<string, any>();
   const panDirectories: Record<string, MockVod[][]> = {
     "folder-family": [
       [folder("folder-2026", "2026 年"), panFile("family-01.mp4", "家庭录像 01.mp4"), panFile("family-01.zh.vtt", "家庭录像 01.zh.vtt", "字幕文件")],
@@ -192,11 +283,18 @@ export function createMockTvApi() {
     getInfo: async () => ({ name: "FongMi Desktop", version: "preview", platform: "darwin", desktopPlatform: "mac", usesMacTrafficLights: true, supportsExternalIina: true, electron: "preview", chrome: "preview", node: "preview", arch: "preview" }),
     listConfigs: async () => configs,
     loadConfig: async (source: string, name = "默认配置") => {
-      configs = configs.map((item) => ({ ...item, enabled: false }));
+      configs = configs.map((item) => ({ ...item, enabled: false, vodEnabled: false }));
       const existing = configs.find((item) => item.url === source);
-      if (existing) Object.assign(existing, { name, enabled: true, updatedAt: Date.now() });
-      else configs.unshift({ id: Date.now(), name, url: source, enabled: true, updatedAt: Date.now() });
-      return {};
+      if (existing) Object.assign(existing, { name, enabled: true, vodEnabled: true, siteCount: existing.siteCount ?? 3, updatedAt: Date.now() });
+      else configs.unshift({ id: Date.now(), name, url: source, enabled: true, vodEnabled: true, liveEnabled: false, siteCount: 3, liveSourceCount: 1, updatedAt: Date.now() });
+      return { sites: [{ key: "demo-http" }], lives: [{}] };
+    },
+    loadLiveConfig: async (source: string, name = "默认直播配置") => {
+      configs = configs.map((item) => ({ ...item, liveEnabled: false }));
+      const existing = configs.find((item) => item.url === source);
+      if (existing) Object.assign(existing, { name, liveEnabled: true, liveSourceCount: existing.liveSourceCount ?? 1, updatedAt: Date.now() });
+      else configs.unshift({ id: Date.now(), name, url: source, enabled: false, vodEnabled: false, liveEnabled: true, siteCount: 0, liveSourceCount: 1, updatedAt: Date.now() });
+      return { sites: [], lives: [{}] };
     },
     renameConfig: async (source: string, name: string) => { configs = configs.map((item) => item.url === source ? { ...item, name, updatedAt: Date.now() } : item); },
     deleteConfig: async (source: string) => { configs = configs.filter((item) => item.url !== source); },
@@ -218,7 +316,9 @@ export function createMockTvApi() {
       const accountProvider = statusProviderForLogin(provider);
       panUnavailable.delete(accountProvider);
       panConfigured.add(accountProvider);
-      panLoggedIn.add(accountProvider);
+      if (provider === "ucCookie") panUcCookieLogin.add(accountProvider);
+      else if (provider === "ucToken") panUcTvTokenLogin.add(accountProvider);
+      else panLoggedIn.add(accountProvider);
       panCredentialModes.set(accountProvider, provider === "ucToken" ? "tv-token" : provider === "ucCookie" ? "cookie" : "scan");
       return { provider, taskId, status: "success", terminal: true, message: "预览登录成功" };
     },
@@ -232,6 +332,8 @@ export function createMockTvApi() {
       panConfigured.delete(provider);
       panUnavailable.delete(provider);
       panCredentialModes.delete(provider);
+      panUcCookieLogin.delete(provider);
+      panUcTvTokenLogin.delete(provider);
       for (const [taskId, loginProvider] of panLoginTasks) {
         if (statusProviderForLogin(loginProvider) === provider) panLoginTasks.delete(taskId);
       }
@@ -242,7 +344,7 @@ export function createMockTvApi() {
       { key: "demo-pan", name: "预览网盘", type: 1, supported: true, runtime: "http", contentType: "pan", categories: ["我的网盘"], capabilities: { home: true, category: true, search: false, detail: true, player: true, proxy: true, health: false } },
       { key: "demo-drpy", name: "光影规则", type: 3, supported: true, runtime: "drpy", capabilities: { home: true, category: true, search: true, detail: true, player: true, proxy: false, health: false } },
       { key: "demo-t4", name: "本地 T4", type: 6, supported: true, runtime: "t4", capabilities: { home: true, category: true, search: true, detail: true, player: true, proxy: false, health: true } },
-      { key: "demo-dex", name: "Android 专用源", type: 3, supported: false, runtime: "android-dex", reason: "该站点依赖 Android Dex/JAR，macOS 无法直接执行。", capabilities: { home: false, category: false, search: false, detail: false, player: false, proxy: false, health: false } },
+      { key: "demo-dex", name: "Android 专用源", type: 3, supported: false, runtime: "android-dex", reason: "该站点依赖 Android Dex/JAR，桌面端无法直接执行。", capabilities: { home: false, category: false, search: false, detail: false, player: false, proxy: false, health: false } },
     ],
     checkSiteHealth: async () => ({ ok: true, latencyMs: 86, message: "服务运行正常" }),
     home: async (siteKey?: string) => siteKey === "demo-pan"
@@ -294,6 +396,43 @@ export function createMockTvApi() {
     listFavorites: async () => favorites,
     saveFavorite: async (record: any) => { favorites = [record, ...favorites.filter((item) => item.vodId !== record.vodId)]; },
     removeFavorite: async (siteKey: string, vodId: string) => { favorites = favorites.filter((item) => item.siteKey !== siteKey || item.vodId !== vodId); },
+    listLiveSources: async () => [{ id: mockLiveSource.id, name: mockLiveSource.name, sourceUrl: mockLiveSource.sourceUrl, format: mockLiveSource.format, boot: true, loaded: true, groupCount: 1, channelCount: 2, lineCount: 3, loadedAt: mockLiveSource.loadedAt }],
+    loadLiveSource: async () => mockLiveSource,
+    loadAllLiveSources: async () => [{ id: mockLiveSource.id, name: mockLiveSource.name, sourceUrl: mockLiveSource.sourceUrl, format: mockLiveSource.format, boot: true, loaded: true, groupCount: 1, channelCount: 2, lineCount: 3, loadedAt: mockLiveSource.loadedAt }],
+    loadLiveEpgGuide: async () => mockEpgGuide(),
+    saveLiveEpgMapping: async () => ({ updatedAt: Date.now() }),
+    removeLiveEpgMapping: async () => undefined,
+    searchLiveChannels: async (_sourceId: string, query = "", groupId?: string) => mockLiveSource.groups
+      .filter((group) => !groupId || group.id === groupId)
+      .flatMap((group) => group.channels)
+      .filter((channel) => !query || channel.name.toLowerCase().includes(query.toLowerCase())),
+    resolveLiveCatchup: async (_sourceId: string, channelId: string, programme: any, lineId?: string) => {
+      const channel = mockLiveSource.groups.flatMap((group) => group.channels).find((item) => item.id === channelId);
+      if (!channel) throw new Error("预览频道不存在");
+      const original = channel.lines.find((item) => item.id === lineId) ?? channel.lines[0]!;
+      const line = { ...original, id: `${original.id}-catchup`, name: `回看 · ${programme.title}`, url: `${original.url}?utc=${Math.floor(programme.startAt / 1000)}`, headers: { ...original.headers }, priority: 0 };
+      return { channel: { ...channel, name: `${channel.name} · ${programme.title}`, lines: [line] }, line, programme };
+    },
+    recordLiveLineFeedback: async () => ({ score: 88, state: "available" }),
+    inspectLiveChannel: async (_sourceId: string, channelId: string) => {
+      const channel = mockLiveSource.groups.flatMap((group) => group.channels).find((item) => item.id === channelId);
+      if (!channel) throw new Error("直播频道不存在");
+      return {
+        ...channel,
+        lines: channel.lines.map((line, index) => ({
+          ...line,
+          health: { state: "available", score: 92 - index * 8, checkedAt: Date.now(), latencyMs: 280 + index * 160, segmentVerified: true, reason: "预览检测通过" },
+        })),
+      };
+    },
+    listLiveFavorites: async () => liveFavorites,
+    saveLiveFavorite: async (record: any) => { liveFavorites = [record, ...liveFavorites.filter((item) => item.sourceId !== record.sourceId || item.channelId !== record.channelId)]; },
+    removeLiveFavorite: async (sourceId: string, channelId: string) => { liveFavorites = liveFavorites.filter((item) => item.sourceId !== sourceId || item.channelId !== channelId); },
+    listLiveRecent: async (limit = 50) => liveRecent.slice(0, limit),
+    saveLiveRecent: async (record: any) => { liveRecent = [record, ...liveRecent.filter((item) => item.sourceId !== record.sourceId || item.channelId !== record.channelId)]; },
+    getLiveCatchupHistory: async (sourceId: string, channelId: string, programmeStartAt: number) => liveCatchupHistory.get(`${sourceId}:${channelId}:${programmeStartAt}`),
+    saveLiveCatchupHistory: async (record: any) => { liveCatchupHistory.set(`${record.sourceId}:${record.channelId}:${record.programmeStartAt}`, { ...record }); },
+    removeLiveCatchupHistory: async (sourceId: string, channelId: string, programmeStartAt: number) => { liveCatchupHistory.delete(`${sourceId}:${channelId}:${programmeStartAt}`); },
     getSetting: async (key: string, fallback: unknown) => getMockSetting(key, fallback),
     setSetting: async (key: string, value: unknown) => { setMockSetting(key, value); },
     openPlayer: async () => ({ status: "started" }),
@@ -304,24 +443,45 @@ export function createMockTvApi() {
     setVolume: async () => undefined,
     setMuted: async () => undefined,
     stop: async () => undefined,
+    setSubtitleTrack: async () => undefined,
+    setSubtitleDelay: async () => undefined,
+    setSubtitleVisibility: async () => undefined,
+    addSubtitle: async () => undefined,
+    setAudioTrack: async () => undefined,
+    setAspectRatio: async () => undefined,
+    getWindowAlwaysOnTop: async () => mockAlwaysOnTop,
+    setWindowAlwaysOnTop: async (enabled: boolean) => {
+      mockAlwaysOnTop = Boolean(enabled);
+      return mockAlwaysOnTop;
+    },
+    getWindowMiniMode: async () => mockMiniMode,
+    setWindowMiniMode: async (enabled: boolean) => {
+      mockMiniMode = Boolean(enabled);
+      if (mockMiniMode) mockAlwaysOnTop = true;
+      return mockMiniMode;
+    },
     attachNativePlayerView: async () => ({ ok: false, backend: "mpv-ipc" }),
     resizeNativePlayerView: async () => ({ ok: false, backend: "mpv-ipc" }),
     detachNativePlayerView: async () => ({ ok: true, backend: "mpv-ipc" }),
     onPlayerState: () => () => undefined,
     preparePlayback: async (input: any) => {
       const episodeUrl = String(input?.episodeUrl ?? "");
-      const hlsPreview = episodeUrl.includes("mock://2/");
+      const livePreview = input?.directMedia?.contentKind === "live";
+      const hlsPreview = livePreview || episodeUrl.includes("mock://2/");
       const panPreview = episodeUrl.startsWith("mock-pan://") && fixtureBaseUrl;
       return {
         sessionId: `preview-${Date.now()}`,
         playbackUrl: panPreview
           ? `${fixtureBaseUrl}/media.mp4`
-          : hlsPreview
-            ? "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+          : livePreview
+            ? String(input.directMedia.url)
+            : hlsPreview
+              ? "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
             : "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
         format: hlsPreview ? "hls" : "mp4",
         engine: "web",
         resolvedBy: "direct",
+        ...(livePreview ? { contentKind: "live" } : {}),
         ...(panPreview ? { subtitleUrl: `${fixtureBaseUrl}/subtitle.vtt`, danmakuUrl: `${fixtureBaseUrl}/danmaku.json` } : {}),
       };
     },

@@ -2,11 +2,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import AppIcon from "./components/AppIcon.vue";
 import PlayerContainer from "./components/PlayerContainer.vue";
+import LivePage from "./components/LivePage.vue";
 import { isFolderItem, resolveContentRoute } from "./app-model.ts";
 import { FONT_SIZE_OPTIONS, fontSizeClass as resolveFontSizeClass, normalizeFontSize, type FontSizePreference } from "./font-size.ts";
 import { resolveEpisodeNavigation, resolveFallbackPlaybackLine, resolvePlaybackEpisodeTarget, resolvePreferredPlaybackLine, type PlaybackLinePreference } from "./player-navigation.ts";
 import { normalizeCompatibilityFallbackMode, type CompatibilityFallbackMode } from "./player/playback-error-policy.ts";
-import { normalizePlaybackMode, normalizeWebPlayerEngine, type PlaybackMode, type WebPlayerEngine } from "./player/player-types.ts";
+import { normalizePlaybackMode, normalizeWebPlayerEngine, type PlaybackMode, type PlayerLiveChannel, type PlayerLiveLine, type WebPlayerEngine } from "./player/player-types.ts";
 import {
   DEFAULT_DANMAKU_SETTINGS,
   DEFAULT_SUBTITLE_SETTINGS,
@@ -29,6 +30,7 @@ import {
   selectHomeSection,
 } from "./home-recommendation.ts";
 import { sortSourcesByQuality } from "../../core/source-ranking.ts";
+import { classifyLiveFailure } from "../../core/live/live-failure.ts";
 import {
   inferCatVodSourceLabel,
   inferConfigName,
@@ -132,7 +134,17 @@ type Vod = {
   flags?: Flag[];
 };
 
-type ConfigRecord = { id?: number; name: string; url: string; enabled: boolean; updatedAt: number };
+type ConfigRecord = {
+  id?: number;
+  name: string;
+  url: string;
+  enabled: boolean;
+  vodEnabled?: boolean;
+  liveEnabled?: boolean;
+  siteCount?: number;
+  liveSourceCount?: number;
+  updatedAt: number;
+};
 type HistoryRecord = {
   siteKey: string;
   vodId: string;
@@ -200,6 +212,82 @@ type SourceAuditStatus = {
   startedAt?: number;
   finishedAt?: number;
 };
+type LiveLineHealth = {
+  state: "unknown" | "available" | "degraded" | "unavailable";
+  score: number;
+  checkedAt: number;
+  latencyMs?: number;
+  resolution?: string;
+  bandwidthKbps?: number;
+  segmentVerified?: boolean;
+  playbackSuccessCount?: number;
+  playbackFailureCount?: number;
+  stablePlaybackSeconds?: number;
+  averageStartupMs?: number;
+  lastPlaybackAt?: number;
+  reason?: string;
+};
+type LiveLine = {
+  id: string;
+  name: string;
+  url: string;
+  headers: Record<string, string>;
+  format?: string;
+  parse: boolean;
+  priority: number;
+  health?: LiveLineHealth;
+};
+type LiveCatchup = { type?: string; regex?: string; source?: string; replace?: string };
+type LiveProgramme = {
+  id: string;
+  channelId: string;
+  startAt: number;
+  endAt: number;
+  title: string;
+  subtitle?: string;
+  description?: string;
+  categories: string[];
+  icon?: string;
+};
+type LiveChannel = {
+  id: string;
+  sourceId: string;
+  groupId: string;
+  name: string;
+  number?: string;
+  logo?: string;
+  tvgId?: string;
+  tvgName?: string;
+  lines: LiveLine[];
+  catchup?: LiveCatchup;
+};
+type LiveSourceSummary = {
+  id: string;
+  name: string;
+  sourceUrl?: string;
+  format?: string;
+  boot: boolean;
+  loaded: boolean;
+  groupCount: number;
+  channelCount: number;
+  lineCount: number;
+  loadedAt?: number;
+  error?: string;
+};
+type LivePlayRequest = {
+  sourceId: string;
+  sourceName: string;
+  channel: LiveChannel;
+  realtimeChannel?: LiveChannel;
+  lineId?: string;
+  realtimeLineId?: string;
+  mode?: "live" | "catchup" | "timeshift";
+  startPosition?: number;
+  programme?: LiveProgramme;
+  channelCount?: number;
+  manualLineSelection?: boolean;
+  forcePreferredLine?: boolean;
+};
 type PlayingState = {
   sessionId: string;
   playbackUrl: string;
@@ -209,6 +297,11 @@ type PlayingState = {
   subtitleUrl?: string;
   danmakuUrl?: string;
   contentKind?: "vod" | "live";
+  liveMode?: "live" | "catchup" | "timeshift";
+  timeshiftAvailable?: boolean;
+  programmeStartAt?: number;
+  programmeEndAt?: number;
+  programmeTitle?: string;
   flag: string;
   title: string;
   episode: string;
@@ -217,8 +310,35 @@ type PlayingState = {
   episodeUrl: string;
   startPosition?: number;
   attemptedFlags: string[];
+  live?: {
+    sourceId: string;
+    sourceName: string;
+    channelId: string;
+    channelCount: number;
+    lines: LiveLine[];
+    realtimeLines: LiveLine[];
+    catchup?: LiveCatchup;
+    lineId: string;
+    realtimeLineId: string;
+    mode: "live" | "catchup" | "timeshift";
+    programmeStartAt?: number;
+    programmeEndAt?: number;
+    programmeTitle?: string;
+    requestStartedAt: number;
+    preflightMs: number;
+    prepareMs: number;
+    sessionStartedAt: number;
+    firstFrameAt?: number;
+    stableFeedbackRecorded: boolean;
+    failoverFeedbackRecorded: boolean;
+    bufferingCount: number;
+    bufferingDurationMs: number;
+    bufferingWindowStartedAt: number;
+    bufferingWindowDurationMs: number;
+    bufferingFailoverStarted: boolean;
+  };
 };
-type Page = "home" | "library" | "search" | "favorites" | "history" | "sources" | "accounts" | "settings" | "detail";
+type Page = "home" | "library" | "live" | "search" | "favorites" | "history" | "sources" | "accounts" | "settings" | "detail";
 type FolderTrailItem = { siteKey: string; folderId: string; title: string };
 type FolderSortMode = "default" | "name-asc" | "name-desc" | "type";
 type SearchGroup = { key: string; primary: Vod; items: Vod[] };
@@ -237,8 +357,8 @@ type CatVodRemoteAccessRecord = {
   firstSeenAt: number;
   lastSeenAt: number;
 };
-type PanProviderId = "quark" | "uc" | "baidu" | "pan115" | "pan189" | "pan139";
-type PanLoginProviderId = "quark" | "ucCookie" | "ucToken" | "baidu" | "pan115" | "pan189" | "pan139";
+type PanProviderId = "quark" | "uc" | "baidu" | "pan115" | "pan123" | "pan189" | "pan139" | "guangya" | "thunder";
+type PanLoginProviderId = "quark" | "ucCookie" | "ucToken" | "baidu" | "pan115" | "pan189" | "pan139" | "guangya";
 type PanAccountState = "connected" | "expired" | "not-configured" | "unavailable";
 type PanCredentialMode = "cookie" | "tv-token" | "scan" | "account-password" | "unknown";
 type PanProviderStatus = {
@@ -251,6 +371,11 @@ type PanProviderStatus = {
   state: string;
   label: string;
   checkedAt: number;
+  ucCookieLogin?: boolean;
+  ucTvTokenLogin?: boolean;
+  ucMember?: boolean;
+  requiresCookie?: boolean;
+  requiresTvToken?: boolean;
 };
 type PanLoginOption = { provider: PanLoginProviderId; label: string };
 type PanProviderDefinition = {
@@ -260,6 +385,7 @@ type PanProviderDefinition = {
   appName: string;
   description: string;
   loginOptions: PanLoginOption[];
+  configOnly?: boolean;
 };
 type PendingPanPlayback = {
   item: Vod;
@@ -307,16 +433,71 @@ declare global {
 }
 
 const PAN_PROVIDER_DEFINITIONS: readonly PanProviderDefinition[] = [
-  { id: "quark", name: "夸克网盘", shortName: "夸", appName: "夸克 App", description: "用于播放夸克分享、极速和原画线路。", loginOptions: [{ provider: "quark", label: "扫码登录" }] },
-  { id: "uc", name: "UC 网盘", shortName: "UC", appName: "UC 浏览器", description: "支持 UC 分享线路，可选择 Cookie 或 TV Token 登录。", loginOptions: [{ provider: "ucCookie", label: "扫码 Cookie" }, { provider: "ucToken", label: "扫码 TV Token" }] },
-  { id: "baidu", name: "百度网盘", shortName: "百", appName: "百度网盘 App", description: "用于解析和播放百度网盘分享内容。", loginOptions: [{ provider: "baidu", label: "扫码登录" }] },
-  { id: "pan115", name: "115 网盘", shortName: "115", appName: "115 App", description: "用于播放 115 分享和已授权的网盘线路。", loginOptions: [{ provider: "pan115", label: "扫码登录" }] },
-  { id: "pan189", name: "天翼云盘", shortName: "天", appName: "天翼云盘 App", description: "用于播放天翼云盘分享和转码线路。", loginOptions: [{ provider: "pan189", label: "扫码登录" }] },
+  { id: "quark", name: "夸克网盘", shortName: "夸", appName: "夸克 App", description: "用于播放 4K 原画与网盘专属高速直连线路。", loginOptions: [{ provider: "quark", label: "扫码登录" }] },
+  { id: "baidu", name: "百度网盘", shortName: "百", appName: "百度网盘 App", description: "用于解析与播放百度网盘分享资源。", loginOptions: [{ provider: "baidu", label: "扫码登录" }] },
+  { id: "pan115", name: "115 网盘", shortName: "115", appName: "115 App", description: "用于播放 115 授权的原画与极速云端线路。", loginOptions: [{ provider: "pan115", label: "扫码登录" }] },
+  { id: "uc", name: "UC 网盘", shortName: "UC", appName: "UC 浏览器", description: "用于播放 UC 网盘直连与原画资源，一键扫码自动授权。", loginOptions: [{ provider: "ucCookie", label: "扫码登录" }] },
+  { id: "pan189", name: "天翼云盘", shortName: "天", appName: "天翼云盘 App", description: "用于播放天翼云盘分享线路。", loginOptions: [{ provider: "pan189", label: "扫码登录" }] },
   { id: "pan139", name: "移动云盘", shortName: "移", appName: "移动云盘 App", description: "用于播放中国移动云盘分享内容。", loginOptions: [{ provider: "pan139", label: "扫码登录" }] },
+  { id: "guangya", name: "光鸭网盘", shortName: "光", appName: "光鸭 App", description: "用于播放光鸭网盘分享线路，支持应用内扫码。", loginOptions: [{ provider: "guangya", label: "扫码登录" }] },
+  { id: "pan123", name: "123 网盘", shortName: "123", appName: "123 网盘", description: "用于播放 123 网盘分享线路。", loginOptions: [], configOnly: true },
+  { id: "thunder", name: "迅雷网盘", shortName: "雷", appName: "迅雷云盘", description: "用于播放迅雷云盘分享线路。", loginOptions: [], configOnly: true },
 ];
 
 const page = ref<Page>("home");
+const livePageRef = ref<{ openProgrammeGuide: (channelId: string) => void } | null>(null);
+const contentContainer = ref<HTMLElement | null>(null);
 const previousPage = ref<Page>("home");
+
+type NavigationHistorySnapshot = {
+  page: Page;
+  keyword: string;
+  searchTitle?: string;
+  folderTrail: FolderTrailItem[];
+  scrollTop: number;
+  selectedFlag?: string;
+  selectedVodId?: string;
+};
+
+const navigationSnapshot = ref<NavigationHistorySnapshot | null>(null);
+
+function saveNavigationSnapshot(fromPage: Page = page.value): void {
+  if (fromPage === "detail") return;
+  const el = contentContainer.value ?? (document.querySelector(".content") as HTMLElement | null);
+  navigationSnapshot.value = {
+    page: fromPage,
+    keyword: keyword.value,
+    searchTitle: searchTitle.value,
+    folderTrail: [...folderTrail.value],
+    scrollTop: el ? el.scrollTop : 0,
+    selectedFlag: selectedFlag.value,
+    selectedVodId: selected.value?.vodId,
+  };
+}
+
+async function restoreNavigationState(): Promise<void> {
+  const snapshot = navigationSnapshot.value;
+  if (!snapshot) return;
+  navigationSnapshot.value = null;
+  page.value = snapshot.page;
+  if (snapshot.keyword !== undefined) {
+    keyword.value = snapshot.keyword;
+  }
+  if (snapshot.searchTitle !== undefined) {
+    searchTitle.value = snapshot.searchTitle;
+  }
+  if (snapshot.folderTrail) {
+    folderTrail.value = [...snapshot.folderTrail];
+  }
+  if (snapshot.page !== "detail") {
+    selected.value = null;
+  }
+  await nextTick();
+  const el = contentContainer.value ?? (document.querySelector(".content") as HTMLElement | null);
+  if (el && typeof snapshot.scrollTop === "number") {
+    el.scrollTop = snapshot.scrollTop;
+  }
+}
 const sites = ref<Site[]>([]);
 const configs = ref<ConfigRecord[]>([]);
 const activeSite = ref("");
@@ -367,6 +548,14 @@ const sourcePickerQuery = ref("");
 const sourcePickerFilter = ref<SourceQuickGroup>("all");
 const sourcePageQuery = ref("");
 const sourcePageFilter = ref<SourceQuickGroup>("all");
+const sourceManagementTab = ref<"vod" | "live">("vod");
+const sourcePoolExpanded = ref(false);
+const advancedPanOpen = ref(false);
+const liveConfigName = ref("");
+const liveConfigUrl = ref("");
+const liveSourceSummaries = ref<LiveSourceSummary[]>([]);
+const liveSourceManagementLoading = ref(false);
+const liveSourceMessage = ref("");
 const recentSourceKeys = ref<string[]>([]);
 const favoriteSourceKeys = ref<string[]>([]);
 const selected = ref<Vod | null>(null);
@@ -378,6 +567,12 @@ const errorTechnicalOpen = ref(false);
 const histories = ref<HistoryRecord[]>([]);
 const favorites = ref<FavoriteRecord[]>([]);
 const playing = ref<PlayingState | null>(null);
+const liveOpening = ref<{ channelName: string; sourceName: string } | null>(null);
+const livePlaybackCatalogSourceId = ref("");
+const livePlaybackCatalog = ref<LiveChannel[]>([]);
+const livePlaybackProgrammeByChannel = ref<Record<string, LiveProgramme>>({});
+let livePlaybackGuidePromise: Promise<void> | undefined;
+let livePlaybackGuidePromiseSourceId = "";
 const latestPlaybackProgress = ref<PlaybackProgress>({ position: 0, duration: 0, completed: false });
 const paused = ref(false);
 const checkingSite = ref("");
@@ -404,7 +599,7 @@ const webPlayerEngine = ref<WebPlayerEngine>("legacy");
 const autoFallbackSource = ref(true);
 const autoNextEpisode = ref(true);
 const fontSize = ref<FontSizePreference>("standard");
-const themeMode = ref<ThemeMode>("system");
+const themeMode = ref<ThemeMode>("dark");
 const systemPrefersDark = ref(true);
 const settingsSaved = ref(false);
 const settingsSaving = ref(false);
@@ -519,7 +714,11 @@ const visibleLibraryItems = computed(() => {
   return sortLibraryItems(filtered, librarySort.value);
 });
 const hotSearchTerms = computed(() => homeItems.value.slice(0, 4).map((item) => item.vodName));
-const activeConfig = computed(() => configs.value.find((config) => config.enabled));
+const activeConfig = computed(() => configs.value.find((config) => config.vodEnabled ?? config.enabled));
+const activeLiveConfig = computed(() => configs.value.find((config) => config.liveEnabled));
+const liveCapableConfigs = computed(() => configs.value.filter((config) => (config.liveSourceCount ?? 0) > 0 || config.liveEnabled));
+const activeLiveSourceCount = computed(() => liveSourceSummaries.value.length);
+const activeLiveChannelCount = computed(() => liveSourceSummaries.value.reduce((sum, source) => sum + source.channelCount, 0));
 const catVodSourceSites = computed(() => selectableSites.value.filter((site) => site.key.startsWith("catvod:")));
 const ordinarySourceSites = computed(() => selectableSites.value.filter((site) => !site.key.startsWith("catvod:")));
 const activeSiteIsCatVod = computed(() => activeSite.value.startsWith("catvod:"));
@@ -532,7 +731,7 @@ const activeSourcePackageSites = computed(() => activeSiteIsCatVod.value
   : ordinarySourceSites.value);
 const activeSourcePackageSiteCount = computed(() => activeSourcePackageSites.value.length);
 const firstCatVodSourceKey = computed(() => catVodSourceSites.value[0]?.key ?? "");
-const otherConfigs = computed(() => configs.value.filter((config) => !config.enabled));
+const otherConfigs = computed(() => configs.value.filter((config) => !(config.vodEnabled ?? config.enabled)));
 const visibleFolderItems = computed(() => {
   const query = folderQuery.value.trim().toLowerCase();
   const filtered = results.value.filter((item) => !query || `${item.vodName} ${item.vodRemarks ?? ""}`.toLowerCase().includes(query));
@@ -578,7 +777,33 @@ const sourcePickerGroups = computed<SourcePickerGroup[]>(() => buildSourcePicker
 ));
 const preferredPlaybackLine = computed(() => resolvePreferredPlaybackLine(selected.value?.flags, linePreference.value));
 const activeLine = computed(() => selected.value?.flags?.find((line) => line.flag === selectedFlag.value) ?? preferredPlaybackLine.value ?? selected.value?.flags?.[0]);
-const playingNavigation = computed(() => resolveEpisodeNavigation(selected.value?.flags, playing.value?.flag, playing.value?.episodeUrl));
+const playingNavigation = computed(() => playing.value?.contentKind === "live"
+  ? undefined
+  : resolveEpisodeNavigation(selected.value?.flags, playing.value?.flag, playing.value?.episodeUrl));
+const livePlayerLines = computed<PlayerLiveLine[]>(() => playing.value?.contentKind === "live" && playing.value.live?.mode === "live"
+  ? playing.value.live.realtimeLines.map((line) => ({
+    id: line.id,
+    name: line.name,
+    status: line.health?.state === "available"
+      ? `优 ${Math.round(line.health.score)}`
+      : line.health?.state === "degraded"
+        ? `备用 ${Math.round(line.health.score)}`
+        : line.health?.state === "unavailable"
+          ? "失效"
+          : "待检测",
+    disabled: isDisabledLiveProtocol(line) || line.health?.state === "unavailable",
+  }))
+  : []);
+const liveHasChannelNavigation = computed(() => Boolean(playing.value?.contentKind === "live" && (playing.value.live?.channelCount ?? 0) > 1));
+const livePlayerChannels = computed<PlayerLiveChannel[]>(() => {
+  const current = playing.value;
+  if (!current?.live || current.live.mode !== "live") return [];
+  return livePlaybackCatalog.value.map((channel) => ({
+    id: channel.id,
+    name: channel.number ? `${channel.number} · ${channel.name}` : channel.name,
+    disabled: channel.lines.length === 0 || channel.lines.every((line) => isDisabledLiveProtocol(line) || line.health?.state === "unavailable"),
+  }));
+});
 const selectedHistory = computed(() => {
   const item = selected.value;
   if (!item?.siteKey) return undefined;
@@ -607,14 +832,14 @@ const sourceAuditProgress = computed(() => sourceAuditStatus.value.total > 0
   : 0);
 const recommendedSourceCount = computed(() => selectableSites.value.filter((site) => isRecommendedSource(site)).length);
 const sourceOverviewTitle = computed(() => {
-  if (recommendedSourceCount.value > 0) return `${recommendedSourceCount.value} 个推荐源`;
-  if (selectableSites.value.length > 0) return `${selectableSites.value.length} 个可尝试源`;
-  return "暂无可用源";
+  if (recommendedSourceCount.value > 0) return "全网聚合已就绪";
+  if (selectableSites.value.length > 0) return `${selectableSites.value.length} 个数据源已接入`;
+  return "全网聚合就绪中";
 });
 const sourceOverviewSubtitle = computed(() => {
-  if (sites.value.length === 0) return "尚未载入播放源";
-  if (selectableSites.value.length === 0) return "当前没有桌面端可用来源";
-  return `${selectableSites.value.length} 个桌面端可用来源`;
+  if (sites.value.length === 0) return "尚未载入影视订阅";
+  if (selectableSites.value.length === 0) return "多源智能准备中";
+  return `${recommendedSourceCount.value > 0 ? recommendedSourceCount.value : selectableSites.value.length} 个优质源并发加速`;
 });
 const fontSizeClass = computed(() => resolveFontSizeClass(fontSize.value));
 const resolvedTheme = computed<"dark" | "light">(() => themeMode.value === "system"
@@ -663,10 +888,11 @@ const capabilityNames: Array<[keyof SourceCapabilities, string]> = [
 const pageTitles: Record<Page, string> = {
   home: "首页",
   library: "片库",
+  live: "电视直播",
   search: "搜索",
   favorites: "我的收藏",
   history: "播放历史",
-  sources: "内容来源",
+  sources: "订阅与源管理",
   accounts: "账号与网盘",
   settings: "设置",
   detail: "影片详情",
@@ -707,6 +933,14 @@ function panCredentialModeLabel(status: PanProviderStatus | undefined): string {
   if (status.credentialMode === "cookie") return "Cookie";
   if (status.credentialMode === "account-password") return "账号密码";
   return "扫码授权";
+}
+
+function panNeedsUcTvToken(status: PanProviderStatus | undefined): boolean {
+  return status?.provider === "uc" && status.requiresTvToken === true;
+}
+
+function panNeedsUcCookie(status: PanProviderStatus | undefined): boolean {
+  return status?.provider === "uc" && status.requiresCookie === true;
 }
 
 function isSubtitleFolderItem(item: Vod): boolean {
@@ -921,12 +1155,13 @@ function showUserError(message: string, context: RendererErrorContext = "generic
 function go(target: Page) {
   clearErrorState();
   selected.value = null;
+  navigationSnapshot.value = null;
   sourcePickerOpen.value = false;
   if (target !== "search") folderTrail.value = [];
   page.value = target;
   if (target === "history" || target === "favorites") void loadLibrary();
   if (target === "library") void loadSourceHome();
-  if (target === "sources") void loadConfigs();
+  if (target === "sources") void Promise.all([loadConfigs(), refreshLiveSourceManagement(false)]);
   if (target === "accounts") void refreshPanStatus();
 }
 
@@ -972,14 +1207,24 @@ function detectPanProviderFromContext(context: string): PanProviderId | undefine
   if (/夸克|quark/i.test(context)) return "quark";
   if (/(?:^|\W)uc(?:\W|$)|UC\s*网盘|优视/i.test(context)) return "uc";
   if (/百度|baidu/i.test(context)) return "baidu";
-  if (/(?:^|\D)115(?:\D|$)|115网盘/i.test(context)) return "pan115";
-  if (/天翼|189网盘|cloud189/i.test(context)) return "pan189";
-  if (/移动云盘|139网盘|和彩云|mcloud/i.test(context)) return "pan139";
+  if (/(?:^|\D)115(?:\D|$)|115网盘|pan115|115\.com|anxia\.com/i.test(context)) return "pan115";
+  if (/123网盘|123云盘|pan123|(?:^|\s)123(?:原画|极速|超清|无损|\s|$)|123684\.com|123865\.com|123912\.com|123592\.com/i.test(context)) return "pan123";
+  if (/天翼|189网盘|cloud189|tianyi|189\.cn|21cn\.com|pan189/i.test(context)) return "pan189";
+  if (/移动云盘|139网盘|和彩云|mcloud|yidong|139\.com|pan139/i.test(context)) return "pan139";
+  if (/光鸭|guangya|guangyapan\.com/i.test(context)) return "guangya";
+  if (/迅雷|xunlei|thunder|pan\.xunlei\.com/i.test(context)) return "thunder";
   return undefined;
 }
 
 function detectPanPlaybackProvider(item: Vod, flag: string, episode: Episode): PanProviderId | undefined {
-  return detectPanProviderFromContext(`${item.siteKey ?? ""} ${item.siteName ?? ""} ${flag} ${episode.name}`);
+  return detectPanProviderFromContext([
+    item.siteKey ?? "",
+    item.siteName ?? "",
+    item.configName ?? "",
+    flag,
+    episode.url,
+    episode.desc ?? "",
+  ].join(" "));
 }
 
 async function promptPanLoginBeforePlayback(
@@ -995,6 +1240,37 @@ async function promptPanLoginBeforePlayback(
   // response instead of the QR code the user needs.
   if (!panStatuses.value[provider]) await refreshPanStatus();
   const status = panStatuses.value[provider];
+  if (panNeedsUcCookie(status)) {
+    pendingPanPlayback.value = {
+      item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
+      flag,
+      episode: { ...episode },
+      startPosition: Math.max(0, startPosition),
+    };
+    await startPanLogin("uc", "ucCookie");
+    return true;
+  }
+  if (panNeedsUcTvToken(status)) {
+    pendingPanPlayback.value = {
+      item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
+      flag,
+      episode: { ...episode },
+      startPosition: Math.max(0, startPosition),
+    };
+    await startPanLogin("uc", "ucToken");
+    return true;
+  }
+  const definition = PAN_PROVIDER_DEFINITIONS.find((entry) => entry.id === provider);
+  if (definition?.configOnly && (!status || shouldPromptPanLoginBeforePlayback(status) || status.accountState === "unavailable")) {
+    panAccountMessage.value = `${definition.name} 请在 CatVod 配置中心完成登录。`;
+    try {
+      await ensureCatVodForPan();
+      await window.tvApi.openCatVodWebsite();
+    } catch (error) {
+      showRendererError(error, "account", panAccountMessage.value);
+    }
+    return true;
+  }
   // Some CatVod provider builds expose login/start even when their aggregate
   // status endpoint is unavailable. For a recognised netdisk line, prefer the
   // QR flow in that unknown state to sending an unauthenticated play request.
@@ -1286,11 +1562,16 @@ async function loadHome(siteKey = activeSite.value) {
   homeLoading.value = true;
   clearErrorState();
   try {
-    const response = requestedSiteKey
-      ? await window.tvApi.home(requestedSiteKey)
-      : window.tvApi.bestHome
-        ? await window.tvApi.bestHome()
-        : { siteKey: "", list: [] };
+    let response = requestedSiteKey
+      ? await window.tvApi.home(requestedSiteKey).catch(() => null)
+      : null;
+    if ((!response || !response.list || !response.list.length) && window.tvApi.bestHome) {
+      const fallback = await window.tvApi.bestHome(requestedSiteKey).catch(() => null);
+      if (fallback && fallback.list && fallback.list.length) {
+        response = fallback;
+      }
+    }
+    if (!response) response = { siteKey: "", list: [] };
     if (requestId !== homeLoadRequestId) return;
     const resolvedSiteKey = response?.siteKey || requestedSiteKey;
     homeLoadedSiteKey.value = resolvedSiteKey;
@@ -1309,6 +1590,58 @@ async function loadHome(siteKey = activeSite.value) {
 
 async function loadConfigs() {
   configs.value = await window.tvApi.listConfigs();
+}
+
+async function refreshLiveSourceManagement(force = false): Promise<void> {
+  if (!window.tvApi.listLiveSources) return;
+  liveSourceManagementLoading.value = true;
+  try {
+    if (force && window.tvApi.loadAllLiveSources) {
+      liveSourceSummaries.value = await window.tvApi.loadAllLiveSources(true);
+    } else {
+      liveSourceSummaries.value = await window.tvApi.listLiveSources();
+    }
+  } catch (value) {
+    showRendererError(value, "config");
+  } finally {
+    liveSourceManagementLoading.value = false;
+  }
+}
+
+async function applyLiveConfig(source: string, name: string): Promise<void> {
+  if (!source) return;
+  if (playing.value?.contentKind === "live") {
+    await window.tvApi.closePlayback(playing.value.sessionId).catch(() => undefined);
+    playing.value = null;
+  }
+  liveSourceManagementLoading.value = true;
+  clearErrorState();
+  try {
+    const importedConfig = await window.tvApi.loadLiveConfig(source, name);
+    await Promise.all([loadConfigs(), refreshLiveSourceManagement(false)]);
+    const summaries = liveSourceSummaries.value;
+    const preferredSourceId = summaries.find((item) => item.boot)?.id ?? summaries[0]?.id ?? "";
+    if (preferredSourceId) await window.tvApi.setSetting("defaultLiveSourceId", preferredSourceId);
+    liveSourceMessage.value = summaries.length
+      ? `已切换直播配置“${name}”，发现 ${summaries.length} 个直播源；点播首页、搜索和片库保持不变。`
+      : `已载入“${name}”，但没有发现可用直播源。`;
+    if (!Array.isArray(importedConfig?.sites) || importedConfig.sites.length === 0) return;
+  } catch (value) {
+    showRendererError(value, "config");
+  } finally {
+    liveSourceManagementLoading.value = false;
+  }
+}
+
+async function loadLiveConfig(source = liveConfigUrl.value.trim(), name = liveConfigName.value.trim() || inferConfigName(source)): Promise<void> {
+  if (!source) return;
+  liveConfigUrl.value = "";
+  liveConfigName.value = "";
+  await applyLiveConfig(source, name);
+}
+
+async function activateLiveConfig(config: ConfigRecord): Promise<void> {
+  await applyLiveConfig(config.url, config.name);
 }
 
 async function checkSiteHealth(site: Site) {
@@ -1367,16 +1700,22 @@ async function applySourceImport(request: PendingSourceImport): Promise<void> {
   loading.value = true;
   clearErrorState();
   try {
+    let importedVodSiteCount = 0;
+    let importedLiveSourceCount = 0;
     if (request.catVodBundle) {
       catVodMd5Url.value = request.source;
       catVodStatus.value = await window.tvApi.startCatVod(request.source, catVodRemoteAccessPolicy.value);
     } else {
-      await window.tvApi.loadConfig(request.source, request.name);
+      const importedConfig = await window.tvApi.loadConfig(request.source, request.name);
+      importedVodSiteCount = Array.isArray(importedConfig?.sites) ? importedConfig.sites.length : 0;
+      importedLiveSourceCount = Array.isArray(importedConfig?.lives) ? importedConfig.lives.length : 0;
     }
     await Promise.all([refreshSites(), loadConfigs()]);
     const importedSiteKey = request.catVodBundle
       ? selectCatVodSiteAfterImport(catVodSourceSites.value.map((site) => site.key), request.previousActiveSite)
-      : selectConfigSiteAfterImport(ordinarySourceSites.value.map((site) => site.key), request.previousActiveSite);
+      : importedVodSiteCount > 0
+        ? selectConfigSiteAfterImport(ordinarySourceSites.value.map((site) => site.key), request.previousActiveSite)
+        : "";
     if (importedSiteKey) {
       activeSite.value = importedSiteKey;
       rememberSource(importedSiteKey);
@@ -1384,11 +1723,17 @@ async function applySourceImport(request: PendingSourceImport): Promise<void> {
     resetSourceSelectionFilters();
     const importedPackageLabel = sourceImportLabel(request);
     contentSourceMessage.value = importedSiteKey
-      ? `已启用 ${importedPackageLabel}，当前播放源为 ${activeSiteRecord.value?.name ?? "首个可用来源"}`
-      : `已启用 ${importedPackageLabel}，但没有发现可用影视来源`;
-    await loadHome(activeSite.value);
-    void startSourceAudit(false);
-    page.value = "home";
+      ? `已启用点播配置 ${importedPackageLabel}，当前点播源为 ${activeSiteRecord.value?.name ?? "首个可用来源"}${importedLiveSourceCount > 0 ? `；同时登记了 ${importedLiveSourceCount} 个直播源，但未切换当前直播配置` : ""}`
+      : importedLiveSourceCount > 0
+        ? `已保存 ${importedPackageLabel}，发现 ${importedLiveSourceCount} 个直播源；当前点播配置和直播配置均未切换`
+        : `已保存 ${importedPackageLabel}，但没有发现可用点播源或直播源`;
+    if (importedSiteKey) {
+      await loadHome(activeSite.value);
+      void startSourceAudit(false);
+      page.value = "home";
+    } else {
+      page.value = "sources";
+    }
   } catch (e) {
     showRendererError(e, request.catVodBundle ? "catvod" : "config");
   } finally {
@@ -1420,7 +1765,7 @@ async function loadConfig(source = configUrl.value.trim(), name = configName.val
   };
   configUrl.value = "";
   configName.value = "";
-  if (playing.value) {
+  if (playing.value && playing.value.contentKind !== "live") {
     pendingSourceImport.value = request;
     contentSourceMessage.value = `${sourceImportLabel(request)} 已加入切换队列，当前视频关闭或播放完成后自动启用`;
     return;
@@ -1458,10 +1803,13 @@ async function deleteConfig(config: ConfigRecord) {
     editingConfigUrl.value = "";
     return;
   }
+  const affectedVod = config.vodEnabled ?? config.enabled;
+  const affectedLive = Boolean(config.liveEnabled);
   await window.tvApi.deleteConfig(config.url);
   deletingConfigUrl.value = "";
-  await Promise.all([loadConfigs(), refreshSites()]);
-  await loadHome();
+  await Promise.all([loadConfigs(), refreshSites(), refreshLiveSourceManagement(false)]);
+  if (affectedVod) await loadHome();
+  if (affectedLive) liveSourceMessage.value = "当前直播配置已删除，系统已尝试切换到下一个可用直播配置。";
 }
 
 function cancelActiveIncrementalSearch(): void {
@@ -1980,6 +2328,7 @@ async function openDetail(item: Vod | FavoriteRecord | HistoryRecord, from: Page
   }
   loading.value = true;
   clearErrorState();
+  if (from !== "detail") saveNavigationSnapshot(from);
   previousPage.value = from === "detail" ? "home" : from;
   const sourceWasMissing = !referencedSource && !sites.value.some((site) => site.key === item.siteKey);
   try {
@@ -2005,9 +2354,13 @@ async function openAndPlay(item: Vod | FavoriteRecord | HistoryRecord, from: Pag
   if (selected.value?.flags?.length) await playFirstEpisode();
 }
 
-function backFromDetail() {
+async function backFromDetail() {
   selected.value = null;
-  page.value = previousPage.value;
+  if (navigationSnapshot.value && navigationSnapshot.value.page !== "detail") {
+    await restoreNavigationState();
+  } else {
+    page.value = previousPage.value || "home";
+  }
 }
 
 function selectPlaybackLine(flag: string) {
@@ -2107,6 +2460,649 @@ function normalizePlaybackEnginePreferences(value: unknown): Record<string, Play
   return Object.fromEntries(entries);
 }
 
+function hasLiveCatchup(channel: Pick<LiveChannel, "catchup">): boolean {
+  const catchup = channel.catchup;
+  if (!catchup) return false;
+  const type = String(catchup.type ?? "").trim().toLowerCase();
+  if (type === "replace") return Boolean(catchup.regex && catchup.replace);
+  if (["flussonic", "fs"].includes(type)) return true;
+  return Boolean(catchup.source);
+}
+
+function liveLineProtocol(line?: LiveLine): string {
+  try {
+    return line ? new URL(line.url).protocol.toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
+function isDisabledLiveProtocol(line?: LiveLine): boolean {
+  const protocol = liveLineProtocol(line);
+  if (["udp:", "rtp:"].includes(protocol)) return true;
+  return ["rtmp:", "rtsp:"].includes(protocol) && appInfo.value?.nativeLibmpv?.available === false;
+}
+
+function canStartLiveLineWithoutProbe(line?: LiveLine): boolean {
+  if (["rtmp:", "rtsp:"].includes(liveLineProtocol(line))) return true;
+  const health = line?.health;
+  if (!health || health.state === "unavailable") return false;
+  const now = Date.now();
+  const recentAvailableProbe = health.state === "available"
+    && health.checkedAt > 0
+    && now - health.checkedAt <= 10 * 60 * 1_000;
+  const recentPlaybackSuccess = Number(health.playbackSuccessCount ?? 0) > 0
+    && Number(health.lastPlaybackAt ?? 0) > 0
+    && now - Number(health.lastPlaybackAt) <= 6 * 60 * 60 * 1_000
+    && Number(health.score ?? 0) >= 60;
+  return recentAvailableProbe || recentPlaybackSuccess;
+}
+
+function orderedLiveLines(request: LivePlayRequest, preferredLineId?: string, forcePreferred = false): LiveLine[] {
+  const rank = (line: LiveLine) => line.health?.state === "available"
+    ? 3
+    : line.health?.state === "degraded"
+      ? 1
+      : line.health?.state === "unavailable"
+        ? 0
+        : 2;
+  return request.channel.lines
+    .filter((line) => line.health?.state !== "unavailable" && !isDisabledLiveProtocol(line))
+    .sort((left, right) => {
+      if (forcePreferred) {
+        const manualOrder = Number(right.id === preferredLineId) - Number(left.id === preferredLineId);
+        if (manualOrder !== 0) return manualOrder;
+      }
+      const stateOrder = rank(right) - rank(left);
+      if (stateOrder !== 0) return stateOrder;
+      const scoreOrder = Number(right.health?.score ?? 0) - Number(left.health?.score ?? 0);
+      if (scoreOrder !== 0) return scoreOrder;
+      const preferredOrder = Number(right.id === preferredLineId) - Number(left.id === preferredLineId);
+      if (preferredOrder !== 0) return preferredOrder;
+      return left.priority - right.priority;
+    });
+}
+
+function rememberLivePlaybackChannel(request: LivePlayRequest): void {
+  if (livePlaybackCatalogSourceId.value !== request.sourceId) {
+    livePlaybackCatalogSourceId.value = request.sourceId;
+    livePlaybackCatalog.value = [];
+    livePlaybackProgrammeByChannel.value = {};
+    livePlaybackGuidePromise = undefined;
+    livePlaybackGuidePromiseSourceId = "";
+  }
+  const channel = cloneLivePlaybackChannel(request.realtimeChannel ?? request.channel);
+  if (request.programme) {
+    livePlaybackProgrammeByChannel.value = {
+      ...livePlaybackProgrammeByChannel.value,
+      [channel.id]: { ...request.programme, categories: [...request.programme.categories] },
+    };
+  }
+  const existingIndex = livePlaybackCatalog.value.findIndex((item) => item.id === channel.id);
+  if (existingIndex >= 0) {
+    livePlaybackCatalog.value.splice(existingIndex, 1, channel);
+  } else {
+    livePlaybackCatalog.value.push(channel);
+  }
+}
+
+async function ensureLivePlaybackCatalog(sourceId: string): Promise<LiveChannel[]> {
+  if (livePlaybackCatalogSourceId.value === sourceId && livePlaybackCatalog.value.length > 1) {
+    return livePlaybackCatalog.value;
+  }
+  const liveSource = await window.tvApi.loadLiveSource(sourceId, false) as { groups?: Array<{ channels?: LiveChannel[] }> };
+  const channels = (liveSource.groups ?? [])
+    .flatMap((group) => group.channels ?? [])
+    .filter((channel) => channel.lines?.length)
+    .map(cloneLivePlaybackChannel);
+  if (livePlaybackCatalogSourceId.value === sourceId && channels.length) {
+    livePlaybackCatalog.value = channels;
+  }
+  return livePlaybackCatalogSourceId.value === sourceId ? livePlaybackCatalog.value : channels;
+}
+
+async function prefetchLiveProgrammes(sourceId: string): Promise<void> {
+  if (typeof window.tvApi.loadLiveEpgGuide !== "function") return;
+  if (livePlaybackGuidePromiseSourceId === sourceId && livePlaybackGuidePromise) return livePlaybackGuidePromise;
+  livePlaybackGuidePromiseSourceId = sourceId;
+  livePlaybackGuidePromise = (async () => {
+    const guide = await window.tvApi.loadLiveEpgGuide(sourceId, false) as {
+      channels?: Record<string, { current?: LiveProgramme }>;
+    };
+    if (livePlaybackCatalogSourceId.value !== sourceId || !guide.channels) return;
+    const programmes: Record<string, LiveProgramme> = {};
+    for (const [channelId, entry] of Object.entries(guide.channels)) {
+      if (entry.current) programmes[channelId] = { ...entry.current, categories: [...entry.current.categories] };
+    }
+    livePlaybackProgrammeByChannel.value = { ...livePlaybackProgrammeByChannel.value, ...programmes };
+  })().catch((error) => {
+    console.warn("[live-guide-prefetch]", error);
+  });
+  return livePlaybackGuidePromise;
+}
+
+async function currentLiveProgramme(sourceId: string, channel: LiveChannel): Promise<LiveProgramme | undefined> {
+  const cached = livePlaybackProgrammeByChannel.value[channel.id];
+  if (cached) return { ...cached, categories: [...cached.categories] };
+
+  await Promise.race([
+    prefetchLiveProgrammes(sourceId),
+    new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
+  ]);
+
+  let programme = livePlaybackProgrammeByChannel.value[channel.id];
+  if (!programme && typeof window.tvApi.loadLiveEpgGuide === "function") {
+    const guide = await window.tvApi.loadLiveEpgGuide(sourceId, false).catch(() => undefined) as {
+      channels?: Record<string, { liveChannelId?: string; epgChannelId?: string; current?: LiveProgramme }>;
+    } | undefined;
+    const entries = Object.values(guide?.channels ?? {});
+    const match = guide?.channels?.[channel.id]
+      ?? entries.find((entry) => entry.liveChannelId === channel.id)
+      ?? entries.find((entry) => Boolean(channel.tvgId) && entry.epgChannelId === channel.tvgId);
+    programme = match?.current;
+    if (programme) {
+      livePlaybackProgrammeByChannel.value = {
+        ...livePlaybackProgrammeByChannel.value,
+        [channel.id]: { ...programme, categories: [...programme.categories] },
+      };
+    }
+  }
+  return programme ? { ...programme, categories: [...programme.categories] } : undefined;
+}
+
+async function playLiveChannel(request: LivePlayRequest, preferredLineId = request.lineId) {
+  if (!request.channel.lines.length) return;
+  await clearExternalFallbackSession();
+  rememberLivePlaybackChannel(request);
+  void ensureLivePlaybackCatalog(request.sourceId).catch((error) => console.warn("[live-channel-catalog]", error));
+  void prefetchLiveProgrammes(request.sourceId);
+  if (!playing.value) {
+    saveNavigationSnapshot(page.value);
+    liveOpening.value = { channelName: request.channel.name, sourceName: request.sourceName };
+  }
+  const requestId = ++playbackRequestId;
+  const startupRequestStartedAt = Date.now();
+  let preflightMs = 0;
+  clearErrorState();
+  sniffing.value = true;
+  let lastError: unknown;
+  let checkedRequest = request;
+  const isCatchup = request.mode === "catchup";
+  const isTimeshift = request.mode === "timeshift";
+  const isReplay = isCatchup || isTimeshift;
+
+  try {
+    if (!isReplay) {
+      const lineToProbe = preferredLineId && request.channel.lines.some((line) => line.id === preferredLineId)
+        ? preferredLineId
+        : orderedLiveLines(request, preferredLineId)[0]?.id;
+      const selectedLine = request.channel.lines.find((line) => line.id === lineToProbe);
+      if (!request.manualLineSelection && !canStartLiveLineWithoutProbe(selectedLine)) {
+        const preflightStartedAt = Date.now();
+        playbackStatus.value = `正在快速检查“${request.channel.name}”的当前线路…`;
+        try {
+          const checkedChannel = await window.tvApi.inspectLiveChannel?.(request.sourceId, request.channel.id, false, lineToProbe);
+          if (requestId !== playbackRequestId) return;
+          if (checkedChannel?.lines?.length) {
+            checkedRequest = {
+              ...request,
+              channel: {
+                ...request.channel,
+                ...checkedChannel,
+                lines: checkedChannel.lines.map((line: LiveLine) => ({ ...line, headers: { ...line.headers }, ...(line.health ? { health: { ...line.health } } : {}) })),
+              },
+            };
+          }
+        } catch {
+          // Detection is advisory. A temporary probe failure must not block manual playback.
+        } finally {
+          preflightMs = Date.now() - preflightStartedAt;
+        }
+      }
+    }
+
+    const candidates = orderedLiveLines(
+      checkedRequest,
+      preferredLineId,
+      Boolean(request.manualLineSelection || request.forcePreferredLine),
+    );
+    const unavailableCount = checkedRequest.channel.lines.length - candidates.length;
+    if (!candidates.length) {
+      const disabledProtocols = request.channel.lines.filter(isDisabledLiveProtocol).map((line) => liveLineProtocol(line).replace(":", "").toUpperCase());
+      if (disabledProtocols.length === request.channel.lines.length) {
+        const protocols = [...new Set(disabledProtocols)];
+        const nativeOnly = protocols.some((protocol) => ["RTMP", "RTSP"].includes(protocol));
+        throw new Error(nativeOnly
+          ? `“${request.channel.name}”仅包含 ${protocols.join("/")} 线路；当前原生 libmpv 内核不可用`
+          : `“${request.channel.name}”仅包含 ${protocols.join("/")} 线路；UDP/RTP 默认关闭，需要显式白名单后才能启用`);
+      }
+      throw new Error(`“${request.channel.name}”的所有线路均未通过可用性检测`);
+    }
+    const previousSessionId = playing.value?.sessionId;
+    if (unavailableCount > 0) playbackStatus.value = `已暂时屏蔽 ${unavailableCount} 条失效线路，正在使用评分最高的可用线路…`;
+    for (let index = 0; index < candidates.length; index += 1) {
+      const line = candidates[index]!;
+      let preparedSessionId = "";
+      playbackStatus.value = index === 0
+        ? isCatchup
+          ? `正在打开节目回看“${request.programme?.title ?? request.channel.name}”…`
+          : isTimeshift
+            ? `正在打开“${request.channel.name}”的直播时移…`
+            : `正在打开“${request.channel.name}”${candidates.length > 1 ? ` · ${line.name}` : ""}…`
+        : `线路不可用，正在尝试“${line.name}”…`;
+      const prepareStartedAt = Date.now();
+      try {
+        const prepared = await window.tvApi.preparePlayback({
+          siteKey: `live-${request.sourceId}`,
+          flag: line.name,
+          episodeUrl: line.url,
+          vodId: checkedRequest.channel.id,
+          vodName: checkedRequest.channel.name,
+          episodeName: isCatchup ? `回看 · ${request.programme?.title ?? request.channel.name}` : isTimeshift ? "直播时移" : "直播",
+          playbackMode: "compatibility",
+          directMedia: {
+            url: line.url,
+            headers: { ...line.headers },
+            format: line.format,
+            contentKind: "live",
+          },
+        });
+        const prepareMs = Date.now() - prepareStartedAt;
+        preparedSessionId = prepared.sessionId;
+        if (requestId !== playbackRequestId) {
+          await window.tvApi.closePlayback(prepared.sessionId).catch(() => undefined);
+          return;
+        }
+        playing.value = {
+          ...prepared,
+          contentKind: "live",
+          flag: line.name,
+          title: checkedRequest.channel.name,
+          episode: isCatchup ? (request.programme?.title ?? line.name) : isTimeshift ? "直播时移" : line.name,
+          siteKey: `live-${request.sourceId}`,
+          vodId: request.realtimeChannel?.id ?? request.channel.id,
+          episodeUrl: line.url,
+          startPosition: Math.max(0, Number(request.startPosition) || 0),
+          liveMode: isCatchup ? "catchup" : isTimeshift ? "timeshift" : "live",
+          timeshiftAvailable: hasLiveCatchup(request.realtimeChannel ?? request.channel),
+          ...(request.programme ? {
+            programmeStartAt: request.programme.startAt,
+            programmeEndAt: request.programme.endAt,
+            programmeTitle: request.programme.title,
+          } : {}),
+          attemptedFlags: candidates.slice(0, index).map((item) => item.name),
+          live: {
+            sourceId: checkedRequest.sourceId,
+            sourceName: checkedRequest.sourceName,
+            channelId: request.realtimeChannel?.id ?? checkedRequest.channel.id,
+            channelCount: Math.max(1, Number(request.channelCount) || 1),
+            lines: checkedRequest.channel.lines.map((item) => ({ ...item, headers: { ...item.headers }, ...(item.health ? { health: { ...item.health } } : {}) })),
+            realtimeLines: (request.realtimeChannel?.lines ?? checkedRequest.channel.lines).map((item) => ({ ...item, headers: { ...item.headers }, ...(item.health ? { health: { ...item.health } } : {}) })),
+            ...((request.realtimeChannel ?? request.channel).catchup ? { catchup: { ...(request.realtimeChannel ?? request.channel).catchup } } : {}),
+            lineId: line.id,
+            realtimeLineId: request.realtimeLineId
+              ?? (request.realtimeChannel?.lines.some((item) => item.id === preferredLineId) ? preferredLineId : undefined)
+              ?? (request.realtimeChannel?.lines[0]?.id)
+              ?? line.id,
+            mode: isCatchup ? "catchup" : isTimeshift ? "timeshift" : "live",
+            requestStartedAt: startupRequestStartedAt,
+            preflightMs,
+            prepareMs,
+            sessionStartedAt: Date.now(),
+            stableFeedbackRecorded: false,
+            failoverFeedbackRecorded: false,
+            bufferingCount: 0,
+            bufferingDurationMs: 0,
+            bufferingWindowStartedAt: Date.now(),
+            bufferingWindowDurationMs: 0,
+            bufferingFailoverStarted: false,
+            ...(request.programme ? {
+              programmeStartAt: request.programme.startAt,
+              programmeEndAt: request.programme.endAt,
+              programmeTitle: request.programme.title,
+            } : {}),
+          },
+        };
+        if (previousSessionId && previousSessionId !== prepared.sessionId) {
+          await window.tvApi.closePlayback(previousSessionId).catch(() => undefined);
+        }
+        console.info("[live-startup]", {
+          stage: "session-prepared",
+          channelId: checkedRequest.channel.id,
+          lineId: line.id,
+          preflightMs,
+          prepareMs,
+          elapsedMs: Date.now() - startupRequestStartedAt,
+        });
+        latestPlaybackProgress.value = { position: 0, duration: 0, completed: false };
+        paused.value = false;
+        playbackStatus.value = "";
+        if (!isReplay) {
+          await window.tvApi.saveLiveRecent({
+            sourceId: checkedRequest.sourceId,
+            channelId: checkedRequest.channel.id,
+            channelName: checkedRequest.channel.name,
+            lineId: line.id,
+            watchedAt: Date.now(),
+          }).catch(() => undefined);
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        const failure = classifyLiveFailure(error instanceof Error ? error.message : String(error));
+        if (!isReplay && typeof window.tvApi.recordLiveLineFeedback === "function") {
+          await window.tvApi.recordLiveLineFeedback({
+            sourceId: checkedRequest.sourceId,
+            channelId: checkedRequest.channel.id,
+            lineId: line.id,
+            lineName: line.name,
+            kind: "failure",
+            playedSeconds: 0,
+            reason: `${failure.label}：${error instanceof Error ? error.message : String(error)}`,
+            occurredAt: Date.now(),
+          }).catch(() => undefined);
+          if (index > 0) {
+            await window.tvApi.recordLiveLineFeedback({
+              sourceId: checkedRequest.sourceId,
+              channelId: checkedRequest.channel.id,
+              lineId: line.id,
+              lineName: line.name,
+              kind: "failover-failure",
+              occurredAt: Date.now(),
+            }).catch(() => undefined);
+          }
+        }
+        if (preparedSessionId) await window.tvApi.closePlayback(preparedSessionId).catch(() => undefined);
+      }
+    }
+    const checkedCount = checkedRequest.channel.lines.filter((line) => line.health?.state !== "unavailable").length;
+    const finalFailure = classifyLiveFailure(lastError instanceof Error ? lastError.message : String(lastError ?? ""));
+    showRendererError(lastError ?? new Error("直播频道没有可用线路"), "playback", `${finalFailure.userMessage} “${request.channel.name}”的 ${checkedCount || checkedRequest.channel.lines.length} 条候选线路均无法播放。`);
+  } finally {
+    if (requestId === playbackRequestId) {
+      sniffing.value = false;
+      liveOpening.value = null;
+      if (!playing.value) playbackStatus.value = "";
+    }
+  }
+}
+
+function liveRequestFromPlaying(current: PlayingState): LivePlayRequest | undefined {
+  if (!current.live) return undefined;
+  const realtimeLines = current.live.realtimeLines.length ? current.live.realtimeLines : current.live.lines;
+  return {
+    sourceId: current.live.sourceId,
+    sourceName: current.live.sourceName,
+    channel: {
+      id: current.live.channelId,
+      sourceId: current.live.sourceId,
+      groupId: "",
+      name: current.title.split(" · ")[0] ?? current.title,
+      lines: realtimeLines.map((line) => ({ ...line, headers: { ...line.headers } })),
+      ...(current.live.catchup ? { catchup: { ...current.live.catchup } } : {}),
+    },
+    lineId: realtimeLines.some((line) => line.id === current.live?.realtimeLineId) ? current.live.realtimeLineId : realtimeLines[0]?.id,
+    mode: "live",
+    channelCount: current.live.channelCount,
+    ...(current.live.mode === "live" && current.live.programmeStartAt && current.live.programmeEndAt && current.live.programmeTitle ? {
+      programme: {
+        id: `current-${current.live.channelId}-${current.live.programmeStartAt}`,
+        channelId: current.live.channelId,
+        startAt: current.live.programmeStartAt,
+        endAt: current.live.programmeEndAt,
+        title: current.live.programmeTitle,
+        categories: [],
+      },
+    } : {}),
+  };
+}
+
+function nextLiveLineId(current: PlayingState): string | undefined {
+  if (!current.live?.realtimeLines.length || current.live.mode !== "live") return undefined;
+  const lines = current.live.realtimeLines
+    .filter((line) => line.health?.state !== "unavailable" && !isDisabledLiveProtocol(line));
+  if (lines.length <= 1) return undefined;
+  const index = lines.findIndex((line) => line.id === current.live?.lineId);
+  return lines[(index + 1 + lines.length) % lines.length]?.id;
+}
+
+function activeRealtimeLiveLine(current: PlayingState): LiveLine | undefined {
+  if (!current.live || current.live.mode !== "live") return undefined;
+  return current.live.realtimeLines.find((line) => line.id === current.live?.lineId)
+    ?? current.live.lines.find((line) => line.id === current.live?.lineId);
+}
+
+function livePlaybackSeconds(current: PlayingState, now = Date.now()): number {
+  const startedAt = current.live?.firstFrameAt ?? current.live?.sessionStartedAt ?? now;
+  return Math.max(0, Math.round((now - startedAt) / 1_000));
+}
+
+async function recordLiveLineFeedback(
+  current: PlayingState,
+  kind: "started" | "stable" | "buffering" | "failure" | "failover-success" | "failover-failure",
+  details: { startupMs?: number; playedSeconds?: number; bufferingCount?: number; bufferingDurationMs?: number; reason?: string } = {},
+): Promise<void> {
+  const line = activeRealtimeLiveLine(current);
+  if (!current.live || !line || typeof window.tvApi.recordLiveLineFeedback !== "function") return;
+  await window.tvApi.recordLiveLineFeedback({
+    sourceId: current.live.sourceId,
+    channelId: current.live.channelId,
+    lineId: line.id,
+    lineName: line.name,
+    kind,
+    ...details,
+    occurredAt: Date.now(),
+  }).catch(() => undefined);
+}
+
+async function recordStableLivePlayback(current: PlayingState, minimumSeconds = 20): Promise<void> {
+  if (!current.live || current.live.mode !== "live" || current.live.stableFeedbackRecorded || !current.live.firstFrameAt) return;
+  const playedSeconds = livePlaybackSeconds(current);
+  if (playedSeconds < minimumSeconds) return;
+  current.live.stableFeedbackRecorded = true;
+  await recordLiveLineFeedback(current, "stable", { playedSeconds });
+}
+
+async function handleLivePlaybackReady(startupMs: number): Promise<void> {
+  const current = playing.value;
+  if (!current?.live || current.live.mode !== "live" || current.live.firstFrameAt) return;
+  current.live.firstFrameAt = Date.now();
+  console.info("[live-startup]", {
+    stage: "first-frame",
+    channelId: current.live.channelId,
+    lineId: current.live.lineId,
+    preflightMs: current.live.preflightMs,
+    prepareMs: current.live.prepareMs,
+    playerMs: Math.max(0, Math.round(Number(startupMs) || 0)),
+    totalMs: Math.max(0, current.live.firstFrameAt - current.live.requestStartedAt),
+  });
+  await recordLiveLineFeedback(current, "started", {
+    startupMs: Math.max(1, Math.round(Number(startupMs) || 1)),
+  });
+  if (!current.live.failoverFeedbackRecorded && current.attemptedFlags.length > 0) {
+    current.live.failoverFeedbackRecorded = true;
+    await recordLiveLineFeedback(current, "failover-success");
+  }
+}
+
+async function handleLiveBuffering(payload: { durationMs: number; cachePercent: number }): Promise<void> {
+  const current = playing.value;
+  if (!current?.live || current.live.mode !== "live" || !current.live.firstFrameAt) return;
+  const durationMs = Math.max(0, Math.min(600_000, Math.round(Number(payload.durationMs) || 0)));
+  if (durationMs < 250) return;
+  const now = Date.now();
+  current.live.bufferingCount += 1;
+  current.live.bufferingDurationMs += durationMs;
+  if (now - current.live.bufferingWindowStartedAt > 60_000) {
+    current.live.bufferingWindowStartedAt = now;
+    current.live.bufferingWindowDurationMs = 0;
+  }
+  current.live.bufferingWindowDurationMs += durationMs;
+  await recordLiveLineFeedback(current, "buffering", {
+    bufferingCount: 1,
+    bufferingDurationMs: durationMs,
+  });
+
+  const nextLineId = nextLiveLineId(current);
+  const shouldFailover = durationMs >= 5_000 || current.live.bufferingWindowDurationMs >= 8_000;
+  if (!shouldFailover || !nextLineId || current.live.bufferingFailoverStarted) return;
+  const request = liveRequestFromPlaying(current);
+  if (!request) return;
+
+  current.live.bufferingFailoverStarted = true;
+  await recordLiveLineFeedback(current, "failure", {
+    playedSeconds: livePlaybackSeconds(current),
+    reason: `直播持续卡顿：60 秒内累计缓冲 ${Math.round(current.live.bufferingWindowDurationMs / 1_000)} 秒`,
+  });
+  if (playing.value !== current) return;
+  playbackStatus.value = "当前直播线路持续卡顿，正在切换备用线路…";
+  await window.tvApi.stop?.().catch(() => undefined);
+  await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+  if (playing.value !== current) return;
+  playing.value = null;
+  paused.value = false;
+  await playLiveChannel({ ...request, forcePreferredLine: true }, nextLineId);
+}
+
+async function startLiveTimeshift(offsetSeconds: number): Promise<void> {
+  const current = playing.value;
+  const realtimeRequest = current ? liveRequestFromPlaying(current) : undefined;
+  if (!current?.live || !realtimeRequest || !hasLiveCatchup(realtimeRequest.channel)) return;
+  const normalizedOffset = Math.max(60, Math.min(24 * 60 * 60, Math.floor(Number(offsetSeconds) || 0)));
+  const now = Date.now();
+  const programme: LiveProgramme = {
+    id: `timeshift-${current.live.channelId}-${now}-${normalizedOffset}`,
+    channelId: current.live.channelId,
+    startAt: now - normalizedOffset * 1_000,
+    endAt: now,
+    title: `时移 ${Math.round(normalizedOffset / 60)} 分钟`,
+    categories: ["直播时移"],
+  };
+  playbackStatus.value = `正在准备 ${Math.round(normalizedOffset / 60)} 分钟前的直播内容…`;
+  try {
+    const resolved = await window.tvApi.resolveLiveCatchup(
+      current.live.sourceId,
+      current.live.channelId,
+      programme,
+      realtimeRequest.lineId,
+    );
+    await playLiveChannel({
+      sourceId: current.live.sourceId,
+      sourceName: current.live.sourceName,
+      channel: resolved.channel,
+      realtimeChannel: realtimeRequest.channel,
+      lineId: resolved.line?.id,
+      realtimeLineId: realtimeRequest.lineId,
+      mode: "timeshift",
+      programme,
+      channelCount: current.live.channelCount,
+    });
+  } catch (error) {
+    showRendererError(error, "playback", "当前频道无法进入直播时移，请继续观看实时直播或稍后重试。");
+  }
+}
+
+async function returnToLiveEdge(): Promise<void> {
+  const current = playing.value;
+  const request = current ? liveRequestFromPlaying(current) : undefined;
+  if (!current || !request) return;
+  playbackStatus.value = "正在返回实时直播…";
+  await playLiveChannel(request, request.lineId);
+}
+
+function cloneLivePlaybackChannel(channel: LiveChannel): LiveChannel {
+  return {
+    ...channel,
+    lines: channel.lines.map((line) => ({
+      ...line,
+      headers: { ...line.headers },
+      ...(line.health ? { health: { ...line.health } } : {}),
+    })),
+    ...(channel.catchup ? { catchup: { ...channel.catchup } } : {}),
+  };
+}
+
+async function switchLiveChannel(direction: -1 | 1, progress: PlaybackProgress): Promise<void> {
+  const current = playing.value;
+  if (!current?.live) return;
+  await saveEmbeddedProgress(progress);
+  if (current.live.mode === "live") await recordStableLivePlayback(current, 20);
+  try {
+    const channels = await ensureLivePlaybackCatalog(current.live.sourceId);
+    if (channels.length < 2) return;
+    const currentIndex = channels.findIndex((channel) => channel.id === current.live?.channelId);
+    const targetIndex = currentIndex < 0
+      ? 0
+      : (currentIndex + direction + channels.length) % channels.length;
+    const target = channels[targetIndex];
+    if (!target?.lines.length) return;
+    playbackStatus.value = `正在切换到${direction < 0 ? "上一个" : "下一个"}频道“${target.name}”…`;
+    const programme = await currentLiveProgramme(current.live.sourceId, target);
+    await playLiveChannel({
+      sourceId: current.live.sourceId,
+      sourceName: current.live.sourceName,
+      channel: cloneLivePlaybackChannel(target),
+      lineId: target.lines[0]?.id,
+      channelCount: channels.length,
+      ...(programme ? { programme } : {}),
+    });
+  } catch (error) {
+    console.error("[live-channel-switch]", error);
+    showRendererError(error, "playback", "切换直播频道失败，请返回频道列表后重试。");
+  }
+}
+
+async function selectLivePlaybackChannel(channelId: string): Promise<void> {
+  const current = playing.value;
+  if (!current?.live || current.live.mode !== "live" || !channelId || channelId === current.live.channelId) return;
+  await recordStableLivePlayback(current, 20);
+  try {
+    const channels = await ensureLivePlaybackCatalog(current.live.sourceId);
+    const target = channels.find((channel) => channel.id === channelId);
+    if (!target?.lines.length) return;
+    playbackStatus.value = `正在切换到“${target.name}”…`;
+    const programme = await currentLiveProgramme(current.live.sourceId, target);
+    await playLiveChannel({
+      sourceId: current.live.sourceId,
+      sourceName: current.live.sourceName,
+      channel: cloneLivePlaybackChannel(target),
+      lineId: target.lines[0]?.id,
+      channelCount: channels.length,
+      ...(programme ? { programme } : {}),
+    });
+  } catch (error) {
+    console.error("[live-channel-select]", error);
+    showRendererError(error, "playback", "切换直播频道失败，当前频道将继续播放。");
+  }
+}
+
+async function selectLivePlaybackLine(lineId: string): Promise<void> {
+  const current = playing.value;
+  const request = current ? liveRequestFromPlaying(current) : undefined;
+  if (!current?.live || current.live.mode !== "live" || !request || !lineId || lineId === current.live.lineId) return;
+  await recordStableLivePlayback(current, 20);
+  playbackStatus.value = "正在切换直播线路…";
+  await playLiveChannel({ ...request, lineId, manualLineSelection: true }, lineId);
+}
+
+async function reconnectLivePlayback(): Promise<void> {
+  const current = playing.value;
+  const request = current ? liveRequestFromPlaying(current) : undefined;
+  if (!current?.live || current.live.mode !== "live" || !request) return;
+  await recordStableLivePlayback(current, 20);
+  playbackStatus.value = "正在刷新当前直播连接…";
+  await playLiveChannel({ ...request, manualLineSelection: true }, current.live.lineId);
+}
+
+async function openLiveProgrammeGuide(progress: PlaybackProgress): Promise<void> {
+  const channelId = playing.value?.live?.channelId;
+  if (!channelId) return;
+  await closeEmbeddedPlayback(progress);
+  page.value = "live";
+  await nextTick();
+  livePageRef.value?.openProgrammeGuide(channelId);
+}
+
 async function play(
   flag: string,
   episode: Episode,
@@ -2184,7 +3180,9 @@ async function play(
   } catch (e) {
     if (requestId !== playbackRequestId) return;
     playbackStatus.value = "";
-    const panProvider = playbackNeedsPanLogin(e) ? detectPanPlaybackProvider(item, flag, episode) : undefined;
+    const panProvider = playbackNeedsPanLogin(e)
+      ? detectPanProviderFromContext(`${item.siteKey ?? ""} ${item.siteName ?? ""} ${item.configName ?? ""} ${flag} ${episode.url} ${friendlyError(e)}`)
+      : undefined;
     if (panProvider) {
       pendingPanPlayback.value = {
         item: { ...item, flags: item.flags?.map((line) => ({ ...line, episodes: line.episodes.map((entry) => ({ ...entry })) })) },
@@ -2308,6 +3306,7 @@ async function cancelSniff() {
     window.tvApi.cancelSniff(),
   ]);
   sniffing.value = false;
+  liveOpening.value = null;
   playbackStatus.value = "";
 }
 
@@ -2315,6 +3314,28 @@ async function saveEmbeddedProgress(progress: PlaybackProgress) {
   latestPlaybackProgress.value = { ...progress };
   const current = playing.value;
   if (!current) return;
+  if (current.contentKind === "live") {
+    if (current.live?.mode === "live") await recordStableLivePlayback(current, 60);
+    if (
+      current.live?.mode === "catchup"
+      && current.live.programmeStartAt
+      && current.live.programmeEndAt
+      && current.live.programmeTitle
+    ) {
+      await window.tvApi.saveLiveCatchupHistory?.({
+        sourceId: current.live.sourceId,
+        channelId: current.live.channelId,
+        programmeStartAt: current.live.programmeStartAt,
+        programmeEndAt: current.live.programmeEndAt,
+        programmeTitle: current.live.programmeTitle,
+        position: progress.position,
+        duration: progress.duration,
+        completed: progress.completed,
+        updatedAt: Date.now(),
+      }).catch(() => undefined);
+    }
+    return;
+  }
   await window.tvApi.saveHistory({
     siteKey: current.siteKey,
     vodId: current.vodId,
@@ -2329,6 +3350,45 @@ async function saveEmbeddedProgress(progress: PlaybackProgress) {
 }
 
 async function handleEmbeddedEnded(progress: PlaybackProgress) {
+  const current = playing.value;
+  if (current?.contentKind === "live") {
+    if (current.live?.mode === "catchup") {
+      await saveEmbeddedProgress({ ...progress, completed: true });
+      await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+      playing.value = null;
+      paused.value = false;
+      playbackStatus.value = "节目回看播放完成";
+      await restoreNavigationState();
+      return;
+    }
+    if (current.live?.mode === "timeshift") {
+      await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+      playing.value = null;
+      paused.value = false;
+      const request = liveRequestFromPlaying(current);
+      if (request) {
+        playbackStatus.value = "时移内容已播放到直播点，正在返回实时直播…";
+        await playLiveChannel(request, request.lineId);
+      }
+      return;
+    }
+    const request = liveRequestFromPlaying(current);
+    const nextLineId = nextLiveLineId(current);
+    const preferredLineId = nextLineId ?? current.live?.lineId;
+    await recordLiveLineFeedback(current, "failure", {
+      playedSeconds: livePlaybackSeconds(current),
+      reason: "直播连接中断",
+    });
+    if (request) {
+      playbackStatus.value = "直播连接已中断，正在播放器内重连或切换备用线路…";
+      await playLiveChannel({ ...request, forcePreferredLine: Boolean(nextLineId) }, preferredLineId);
+    } else {
+      await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+      playing.value = null;
+      await restoreNavigationState();
+    }
+    return;
+  }
   await saveEmbeddedProgress(progress);
   if (pendingSourceImport.value) {
     const current = playing.value;
@@ -2336,23 +3396,29 @@ async function handleEmbeddedEnded(progress: PlaybackProgress) {
     playing.value = null;
     paused.value = false;
     await loadLibrary(false);
+    await restoreNavigationState();
     await applyPendingSourceImport();
     return;
   }
   const next = playingNavigation.value?.next;
   if (autoNextEpisode.value && next) {
     playbackStatus.value = `本集播放完成，正在自动播放 ${next.name}…`;
-    await switchEmbeddedEpisode(next.url, progress);
+    const switched = await switchEmbeddedEpisode(next.url, progress);
+    if (!switched) {
+      await closeEmbeddedPlayback({ ...progress, completed: true });
+    }
+  } else {
+    await closeEmbeddedPlayback({ ...progress, completed: true });
   }
 }
 
 
-async function switchEmbeddedEpisode(episodeUrl: string, progress: PlaybackProgress) {
+async function switchEmbeddedEpisode(episodeUrl: string, progress: PlaybackProgress): Promise<boolean> {
   const current = playing.value;
   const navigation = playingNavigation.value;
-  if (!current || !navigation || episodeUrl === current.episodeUrl) return;
+  if (!current || !navigation || episodeUrl === current.episodeUrl) return false;
   const episode = navigation.episodes.find((item) => item.url === episodeUrl);
-  if (!episode) return;
+  if (!episode) return false;
 
   await saveEmbeddedProgress(progress);
   const previousSessionId = current.sessionId;
@@ -2360,18 +3426,31 @@ async function switchEmbeddedEpisode(episodeUrl: string, progress: PlaybackProgr
   // prepared. Stopping it first leaves libmpv with an empty surface whenever a
   // provider takes a moment to resolve the next episode.
   paused.value = false;
-  await play(navigation.flag, episode, 0);
-  if (playing.value?.sessionId !== previousSessionId) {
-    await window.tvApi.closePlayback(previousSessionId).catch(() => undefined);
+  try {
+    await play(navigation.flag, episode, 0);
+    if (playing.value?.sessionId !== previousSessionId) {
+      await window.tvApi.closePlayback(previousSessionId).catch(() => undefined);
+    }
+    return Boolean(playing.value);
+  } catch {
+    return false;
   }
 }
 
 async function playPreviousEmbeddedEpisode(progress: PlaybackProgress) {
+  if (playing.value?.contentKind === "live") {
+    await switchLiveChannel(-1, progress);
+    return;
+  }
   const previous = playingNavigation.value?.previous;
   if (previous) await switchEmbeddedEpisode(previous.url, progress);
 }
 
 async function playNextEmbeddedEpisode(progress: PlaybackProgress) {
+  if (playing.value?.contentKind === "live") {
+    await switchLiveChannel(1, progress);
+    return;
+  }
   const next = playingNavigation.value?.next;
   if (next) await switchEmbeddedEpisode(next.url, progress);
 }
@@ -2384,10 +3463,14 @@ async function closeEmbeddedPlayback(progress: PlaybackProgress) {
   const current = playing.value;
   if (!current) return;
   await saveEmbeddedProgress(progress);
+  if (current.contentKind === "live" && current.live?.mode === "live") {
+    await recordStableLivePlayback(current, 20);
+  }
   await window.tvApi.closePlayback(current.sessionId);
   playing.value = null;
   paused.value = false;
-  await loadLibrary(false);
+  if (current.contentKind !== "live") await loadLibrary(false);
+  await restoreNavigationState();
   await applyPendingSourceImport();
 }
 
@@ -2399,6 +3482,7 @@ async function stopPlaybackAndApplyPendingSource(): Promise<void> {
   playing.value = null;
   paused.value = false;
   await loadLibrary(false);
+  await restoreNavigationState();
   await applyPendingSourceImport();
 }
 
@@ -2412,24 +3496,34 @@ async function fallbackEmbeddedPlayback(progress: PlaybackProgress) {
   const current = playing.value;
   if (!current) return;
   await saveEmbeddedProgress(progress);
-  await rememberCompatibilityPlayback(current.siteKey, current.flag, current.episodeUrl);
+  if (current.contentKind !== "live") await rememberCompatibilityPlayback(current.siteKey, current.flag, current.episodeUrl);
   playing.value = {
     ...current,
     engine: "mpv",
-    startPosition: Math.max(0, progress.position),
+    startPosition: current.contentKind === "live" ? 0 : Math.max(0, progress.position),
   };
   paused.value = false;
   playbackStatus.value = "标准播放模式无法正常加载，已切换到高兼容播放模式。";
-  await loadLibrary(false);
+  if (current.contentKind !== "live") await loadLibrary(false);
 }
 
 async function handleWebPlayerReprepare(progress: PlaybackProgress) {
   const current = playing.value;
   if (!current) return;
+  const liveRequest = current.contentKind === "live" ? liveRequestFromPlaying(current) : undefined;
   await saveEmbeddedProgress(progress);
+  paused.value = false;
+  if (liveRequest) {
+    await recordLiveLineFeedback(current, "failure", {
+      playedSeconds: livePlaybackSeconds(current),
+      reason: "播放器请求重新准备直播地址",
+    });
+    playbackStatus.value = "直播地址可能已中断，正在播放器内重新连接…";
+    await playLiveChannel(liveRequest, current.live?.lineId);
+    return;
+  }
   await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
   playing.value = null;
-  paused.value = false;
   playbackStatus.value = "播放地址可能已过期，正在重新获取后继续播放…";
   await play(current.flag, { name: current.episode, url: current.episodeUrl }, Math.max(0, progress.position), [], [], 1);
 }
@@ -2437,6 +3531,53 @@ async function handleWebPlayerReprepare(progress: PlaybackProgress) {
 async function handleCompatibilityPlaybackFailure(payload: CompatibilityPlaybackFailure) {
   const current = playing.value;
   if (!current) return;
+  if (current.contentKind === "live") {
+    if (current.live?.mode === "catchup") {
+      await saveEmbeddedProgress(payload.progress);
+      await window.tvApi.stop?.().catch(() => undefined);
+      await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+      playing.value = null;
+      paused.value = false;
+      showRendererError(new Error(payload.reason), "playback", "节目回看播放失败，请返回节目单后重试或选择其他节目。");
+      return;
+    }
+    if (current.live?.mode === "timeshift") {
+      const request = liveRequestFromPlaying(current);
+      await window.tvApi.stop?.().catch(() => undefined);
+      await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+      playing.value = null;
+      paused.value = false;
+      if (request) {
+        playbackStatus.value = "直播时移已中断，正在返回实时直播…";
+        await playLiveChannel(request, request.lineId);
+      }
+      return;
+    }
+    const request = liveRequestFromPlaying(current);
+    const nextLineId = nextLiveLineId(current);
+    const failure = classifyLiveFailure(payload.reason);
+    await recordLiveLineFeedback(current, "failure", {
+      playedSeconds: livePlaybackSeconds(current),
+      reason: `${failure.label}：${payload.reason}`,
+    });
+    if (current.attemptedFlags.length > 0 && !current.live.failoverFeedbackRecorded) {
+      current.live.failoverFeedbackRecorded = true;
+      await recordLiveLineFeedback(current, "failover-failure");
+    }
+    paused.value = false;
+    if (request) {
+      playbackStatus.value = `${failure.userMessage} 正在播放器内重连或尝试备用直播线路…`;
+      await playLiveChannel(
+        { ...request, forcePreferredLine: Boolean(nextLineId) },
+        nextLineId ?? current.live?.lineId,
+      );
+    } else {
+      await window.tvApi.stop?.().catch(() => undefined);
+      await window.tvApi.closePlayback(current.sessionId).catch(() => undefined);
+      playing.value = null;
+    }
+    return;
+  }
   const item = selected.value?.siteKey === current.siteKey && selected.value.vodId === current.vodId
     ? selected.value
     : undefined;
@@ -2645,8 +3786,19 @@ async function pollPanLogin() {
     if (taskId !== panLoginTaskId.value || !panLoginOpen.value) return;
     applyPanLoginResult(result);
     if (result.status === "success") {
+      const completedLoginProvider = loginProvider;
       stopPanLoginPolling();
       await refreshPanStatus();
+      if (completedLoginProvider === "ucCookie" && panNeedsUcTvToken(panStatuses.value.uc)) {
+        panLoginMessage.value = "Cookie 登录成功，普通会员还需要再扫描一次 TV Token…";
+        await startPanLogin("uc", "ucToken");
+        return;
+      }
+      if (completedLoginProvider === "ucToken" && panNeedsUcCookie(panStatuses.value.uc)) {
+        panLoginMessage.value = "TV Token 登录成功，还需要再扫描一次 Cookie…";
+        await startPanLogin("uc", "ucCookie");
+        return;
+      }
       const pending = pendingPanPlayback.value;
       const pendingFolder = pendingPanFolder.value;
       pendingPanPlayback.value = null;
@@ -2685,7 +3837,16 @@ async function pollPanLogin() {
 
 async function startPanLogin(provider: PanProviderId, loginProvider?: PanLoginProviderId) {
   const definition = PAN_PROVIDER_DEFINITIONS.find((entry) => entry.id === provider) ?? PAN_PROVIDER_DEFINITIONS[0]!;
-  const targetLoginProvider = loginProvider ?? definition.loginOptions[0]!.provider;
+  const targetLoginProvider = loginProvider
+    ?? (provider === "uc" && panNeedsUcCookie(panStatuses.value.uc) ? "ucCookie"
+      : provider === "uc" && panNeedsUcTvToken(panStatuses.value.uc) ? "ucToken"
+      : definition.loginOptions[0]?.provider);
+  if (!targetLoginProvider) {
+    panAccountMessage.value = `${definition.name} 请在 CatVod 配置中心完成登录。`;
+    await ensureCatVodForPan();
+    await window.tvApi.openCatVodWebsite();
+    return;
+  }
   stopPanLoginPolling();
   const previousTask = panLoginTaskId.value;
   if (previousTask) await window.tvApi.cancelPanLogin(previousTask).catch(() => undefined);
@@ -3022,8 +4183,14 @@ onMounted(async () => {
     await nextTick();
     restoringInitialSite = false;
     if (activeSite.value && activeSite.value !== savedSite) await window.tvApi.setSetting("defaultSite", activeSite.value);
-    await loadHome();
-    await startSourceAudit(false);
+    const liveSources = window.tvApi.listLiveSources ? await window.tvApi.listLiveSources() : [];
+    if (!sites.value.length && Array.isArray(liveSources) && liveSources.length > 0) {
+      resetHomeContent();
+      page.value = "live";
+    } else {
+      await loadHome();
+      await startSourceAudit(false);
+    }
   } catch (e) {
     showRendererError(e, "home");
   } finally {
@@ -3049,23 +4216,31 @@ onBeforeUnmount(() => {
   removeCatVodHostEvent?.();
   removeCatVodHostEvent = undefined;
 });
+
+const usesMacTrafficLights = computed(() => {
+  if (typeof appInfo.value?.usesMacTrafficLights === "boolean") {
+    return appInfo.value.usesMacTrafficLights;
+  }
+  return (window as any).tvApi?.platform === "darwin";
+});
 </script>
 
 <template>
   <div class="app-shell" :class="[fontSizeClass, themeClass]">
     <aside class="sidebar">
-      <div class="window-drag-zone"></div>
+      <div v-if="usesMacTrafficLights" class="window-drag-zone"></div>
       <div class="brand-block">
-        <div class="brand-mark"><AppIcon name="play" :size="17" /></div>
+        <div class="brand-mark"><AppIcon name="play" :size="20" /></div>
         <div>
-          <strong>FongMi</strong>
-          <span>Desktop Edition</span>
+          <strong>FongMi Cinema</strong>
+          <span>Next-Gen Streaming</span>
         </div>
       </div>
 
       <nav class="primary-nav">
         <button :class="{ active: page === 'home' }" @click="go('home')"><AppIcon name="home" />首页</button>
         <button :class="{ active: page === 'library' }" @click="go('library')"><AppIcon name="film" />片库</button>
+        <button :class="{ active: page === 'live' }" @click="go('live')"><AppIcon name="play" />直播</button>
         <button :class="{ active: page === 'search' }" @click="go('search')"><AppIcon name="search" />搜索</button>
       </nav>
 
@@ -3077,7 +4252,7 @@ onBeforeUnmount(() => {
 
       <div class="nav-label">管理</div>
       <nav class="secondary-nav">
-        <button :class="{ active: page === 'sources' }" @click="go('sources')"><AppIcon name="sources" />内容来源</button>
+        <button :class="{ active: page === 'sources' }" title="内容来源与订阅管理" @click="go('sources')"><AppIcon name="sources" />订阅与源管理</button>
         <button :class="{ active: page === 'accounts' }" @click="go('accounts')"><AppIcon name="account" />账号与网盘</button>
         <button :class="{ active: page === 'settings' }" @click="go('settings')"><AppIcon name="settings" />设置</button>
       </nav>
@@ -3092,7 +4267,7 @@ onBeforeUnmount(() => {
     </aside>
 
     <div class="workspace">
-      <header class="topbar" :class="{ 'without-search': page === 'search' }">
+      <header class="topbar" :class="{ 'without-search': page === 'search' || page === 'live' }">
         <div class="page-heading">
           <button v-if="page === 'detail'" class="icon-button back-button" @click="backFromDetail"><AppIcon name="back" /></button>
           <div>
@@ -3101,15 +4276,15 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="page !== 'search'" class="topbar-search">
+        <div v-if="page !== 'search' && page !== 'live'" class="topbar-search">
           <AppIcon name="search" :size="18" />
           <input v-model="keyword" placeholder="搜索影片、电视剧、综艺" @keyup.enter="search" />
           <kbd>↵</kbd>
         </div>
 
-        <button class="source-picker-trigger" :class="{ open: sourcePickerOpen }" aria-label="选择播放源" @click="toggleSourcePicker()">
+        <button v-if="page !== 'live'" class="source-picker-trigger" :class="{ open: sourcePickerOpen }" aria-label="全网智能聚合选路" @click="toggleSourcePicker()">
           <span class="source-picker-trigger-dot" :class="{ offline: !activeSiteRecord }"></span>
-          <span class="source-picker-trigger-copy"><small>当前播放源 · {{ activeSourcePackageLabel }}</small><strong>{{ activeSiteRecord?.name ?? '暂无可用播放源' }}</strong></span>
+          <span class="source-picker-trigger-copy"><small>全网智能聚合</small><strong>{{ activeSiteRecord?.name ? `已接入 · ${activeSiteRecord.name}` : '全网多源就绪' }}</strong></span>
           <AppIcon name="chevron" :size="15" />
         </button>
       </header>
@@ -3162,7 +4337,7 @@ onBeforeUnmount(() => {
         <button v-else @click="playbackStatus = ''"><AppIcon name="close" :size="16" /></button>
       </div>
 
-      <main class="content" :class="{ 'with-player': playing }">
+      <main ref="contentContainer" class="content" :class="{ 'with-player': playing }">
         <section v-if="page === 'home'" class="page home-page redesigned-home">
           <div v-if="homeLoading" class="hero hero-loading">
             <div class="loading-spinner"></div>
@@ -3305,6 +4480,14 @@ onBeforeUnmount(() => {
           <div v-else-if="!libraryLoading" class="empty-state"><div class="empty-icon"><AppIcon name="film" :size="30" /></div><h2>当前分类暂无内容</h2><p>可以切换分类或其他播放源后再次查看。</p></div>
           <div v-if="selectedLibraryCategory?.sourceCategories.length && libraryHasMore" class="library-load-more"><button class="secondary-button" :disabled="libraryLoading" @click="loadMoreLibrary">{{ libraryLoading ? '加载中…' : `加载更多（${libraryPage}/${libraryPageCount}）` }}</button></div>
         </section>
+
+        <LivePage
+          v-else-if="page === 'live'"
+          ref="livePageRef"
+          @play="playLiveChannel"
+          @status="playbackStatus = $event"
+          @error="showRendererError($event, 'playback')"
+        />
 
         <section v-else-if="page === 'search'" class="page search-page redesigned-search">
           <div class="search-header-row">
@@ -3479,59 +4662,21 @@ onBeforeUnmount(() => {
 
         <section v-else-if="page === 'sources'" class="page sources-page quick-source-page">
           <div class="quick-source-header">
-            <div><small>CONTENT SOURCES</small><h1>内容来源</h1><p>在一个页面完成来源选择、配置导入、配置切换和可用性检查。</p></div>
-            <button class="secondary-button" :disabled="sourceAuditStatus.running || checkingSite === '__all__'" @click="refreshSourceStatus"><AppIcon name="refresh" :size="16" />{{ sourceAuditStatus.running || checkingSite === '__all__' ? `检测中 ${sourceAuditProgress}%` : '检查并修复' }}</button>
+            <div><small>SUBSCRIPTIONS & PROVIDERS</small><h1>订阅与源管理</h1><p>点播源与直播源独立管理，已自动为你聚合 {{ selectableSites.length }} 个数据源。</p></div>
+            <button v-if="sourceManagementTab === 'vod'" class="secondary-button" :disabled="sourceAuditStatus.running || checkingSite === '__all__'" @click="refreshSourceStatus"><AppIcon name="refresh" :size="16" />{{ sourceAuditStatus.running || checkingSite === '__all__' ? `检测中 ${sourceAuditProgress}%` : '检查并修复' }}</button>
+            <button v-else class="secondary-button" :disabled="liveSourceManagementLoading" @click="refreshLiveSourceManagement(true)"><AppIcon name="refresh" :size="16" />{{ liveSourceManagementLoading ? '刷新中…' : '刷新直播源' }}</button>
           </div>
 
-          <label class="quick-source-search"><AppIcon name="search" :size="18" /><input v-model="sourcePageQuery" placeholder="搜索播放源，例如：玩偶、4K、韩剧" /></label>
-          <div class="quick-source-tabs">
-            <button v-for="item in [{ key: 'all', label: '全部' }, { key: 'favorite', label: '收藏' }, { key: 'recent', label: '最近使用' }, { key: '4k', label: '4K' }, { key: 'quick', label: '秒播' }, { key: 'collect', label: '采集' }] as const" :key="item.key" :class="{ active: sourcePageFilter === item.key }" @click="sourcePageFilter = item.key">{{ item.label }}</button>
+          <div class="source-domain-tabs" role="tablist" aria-label="来源类型">
+            <button :class="{ active: sourceManagementTab === 'vod' }" @click="sourceManagementTab = 'vod'"><AppIcon name="film" :size="17" /><span><strong>影视订阅包</strong><small>全网聚合推荐、搜索与播放</small></span></button>
+            <button :class="{ active: sourceManagementTab === 'live' }" @click="sourceManagementTab = 'live'; refreshLiveSourceManagement(false)"><AppIcon name="play" :size="17" /><span><strong>电视直播源</strong><small>仅影响电视直播频道与节目单</small></span></button>
           </div>
 
-          <section v-if="sourcePageFilter === 'all' && favoriteSourceSites.length" class="quick-source-section">
-            <div class="quick-source-section-heading"><div><h2>收藏来源</h2><span>你手动固定的常用播放源</span></div><em>{{ Math.min(favoriteSourceSites.length, 4) }}</em></div>
-            <div class="quick-source-grid recent-source-grid">
-              <button v-for="site in favoriteSourceSites.slice(0, 4)" :key="`favorite:${site.key}`" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
-                <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
-                <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
-                <span class="source-favorite-toggle quick-source-favorite selected" role="button" aria-label="取消收藏来源" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
-                <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
-              </button>
-            </div>
-          </section>
-
-          <section v-if="sourcePageFilter === 'all' && recentSourceSites.length" class="quick-source-section">
-            <div class="quick-source-section-heading"><div><h2>最近使用</h2><span>结合最近播放成功和响应速度排序</span></div><em>{{ Math.min(recentSourceSites.length, 4) }}</em></div>
-            <div class="quick-source-grid recent-source-grid">
-              <button v-for="site in recentSourceSites.slice(0, 4)" :key="`recent:${site.key}`" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
-                <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
-                <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
-                <span class="source-favorite-toggle quick-source-favorite" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
-                <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
-              </button>
-            </div>
-          </section>
-
-          <section class="quick-source-section">
-            <div class="quick-source-section-heading"><div><h2>{{ sourcePageFilter === 'all' ? '全部内容来源' : sourcePageFilter === 'favorite' ? '收藏来源' : sourcePageFilter === 'recent' ? '最近使用' : sourcePageFilter === '4k' ? '4K 来源' : sourcePageFilter === 'quick' ? '秒播来源' : '采集来源' }}</h2><span>按收藏、最近使用、播放成功、搜索表现和响应速度排序</span></div><em>{{ sourcePageSites.length }}</em></div>
-            <div v-if="sourcePageSites.length" class="quick-source-grid">
-              <button v-for="site in sourcePageSites" :key="site.key" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
-                <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
-                <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
-                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
-                <span class="source-favorite-toggle quick-source-favorite" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
-                <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
-              </button>
-            </div>
-            <div v-else class="empty-state compact-empty quick-source-empty"><div class="empty-icon"><AppIcon name="search" :size="26" /></div><h3>没有找到匹配来源</h3><p>尝试更换关键词或分类。</p></div>
-          </section>
-
+          <template v-if="sourceManagementTab === 'vod'">
           <section class="settings-card source-config-settings-card content-source-config-card">
-            <div class="settings-card-heading"><div class="settings-icon"><AppIcon name="plus" /></div><div><h2>添加内容配置</h2><p>通常只需粘贴配置地址，名称会自动识别。</p></div></div>
+            <div class="settings-card-heading"><div class="settings-icon"><AppIcon name="plus" /></div><div><h2>添加内容配置</h2><p>通常只需粘贴配置地址，名称会自动识别；导入后将自动参与全网聚合。</p></div></div>
             <div class="source-config-overview">
-              <div><span class="source-live-dot"></span><span><small>当前来源包</small><strong>{{ activeSourcePackageLabel }}</strong></span><em>{{ activeSourcePackageSiteCount }} 个可用影视源</em></div>
+              <div><span class="source-live-dot"></span><span><small>当前生效订阅</small><strong>{{ activeSourcePackageLabel }}</strong></span><em>{{ activeSourcePackageSiteCount }} 个影视站点已就绪</em></div>
               <small v-if="contentSourceMessage" class="replacement-registry-message">{{ contentSourceMessage }}</small>
             </div>
             <div v-if="pendingSourceImport" class="pending-source-import-note">
@@ -3540,7 +4685,7 @@ onBeforeUnmount(() => {
               <button class="secondary-button" @click="cancelPendingSourceImport">取消</button>
             </div>
             <div class="source-config-import-form simplified-source-import-form">
-              <label class="source-config-url-field"><span>配置地址或本地路径</span><input v-model="configUrl" placeholder="粘贴配置地址后按回车即可导入" @keyup.enter="loadConfig()" /></label>
+              <label class="source-config-url-field"><span>订阅配置地址或本地路径</span><input v-model="configUrl" placeholder="粘贴配置地址后按回车即可导入" @keyup.enter="loadConfig()" /></label>
               <label><span>名称（可选）</span><input v-model="configName" placeholder="留空自动识别" /></label>
               <button class="primary-button" :disabled="!configUrl.trim() || loading" @click="loadConfig()"><AppIcon name="plus" :size="15" />{{ loading ? '正在导入…' : '导入并使用' }}</button>
             </div>
@@ -3548,14 +4693,14 @@ onBeforeUnmount(() => {
               <article v-if="catVodStatus?.state === 'running'" class="source-config-settings-row source-runtime-settings-row" :class="{ active: activeSiteIsCatVod }">
                 <span class="source-config-settings-icon"><AppIcon name="sources" :size="17" /></span>
                 <div class="source-config-settings-copy"><strong>{{ catVodSourceLabel }}</strong><span>CatVod 运行环境 · {{ catVodSourceSites.length }} 个可用影视源</span></div>
-                <span class="source-config-settings-state">{{ activeSiteIsCatVod ? '当前来源包' : '运行中' }}</span>
+                <span class="source-config-settings-state">{{ activeSiteIsCatVod ? '当前使用中' : '运行中' }}</span>
                 <button v-if="!activeSiteIsCatVod && firstCatVodSourceKey" class="secondary-button" @click="selectSource(firstCatVodSourceKey)">使用</button>
               </article>
               <article v-for="config in configs" :key="config.id ?? config.url" class="source-config-settings-row" :class="{ active: config.enabled && !activeSiteIsCatVod }">
                 <span class="source-config-settings-icon"><AppIcon name="sources" :size="17" /></span>
                 <div v-if="editingConfigUrl === config.url" class="config-rename-row"><input v-model="editingConfigName" aria-label="配置名称" @keyup.enter="saveConfigName(config)" @keyup.esc="cancelRenameConfig" /><button class="compact-action primary" @click="saveConfigName(config)">保存</button><button class="compact-action" @click="cancelRenameConfig">取消</button></div>
-                <div v-else class="source-config-settings-copy"><strong>{{ config.name }}</strong><span>{{ config.enabled ? (activeSiteIsCatVod ? '配置已载入' : '当前使用') : `更新于 ${formatDate(config.updatedAt)}` }}</span></div>
-                <span class="source-config-settings-state">{{ config.enabled ? (activeSiteIsCatVod ? '已载入' : '当前') : '可切换' }}</span>
+                <div v-else class="source-config-settings-copy"><strong>{{ config.name }}</strong><span>{{ config.enabled ? (activeSiteIsCatVod ? '配置已载入' : '当前生效') : `更新于 ${formatDate(config.updatedAt)}` }}</span></div>
+                <span class="source-config-settings-state">{{ config.enabled ? (activeSiteIsCatVod ? '已载入' : '当前生效') : '可切换' }}</span>
                 <button v-if="!config.enabled || activeSiteIsCatVod" class="secondary-button" @click="activateConfig(config)">{{ config.enabled ? '使用' : '切换' }}</button>
                 <button class="icon-button config-icon-button" title="重命名" @click="beginRenameConfig(config)"><AppIcon name="edit" :size="15" /></button>
                 <button class="icon-button config-icon-button danger" :title="deletingConfigUrl === config.url ? '再次点击确认删除' : '删除配置'" @click="deleteConfig(config)"><AppIcon name="trash" :size="15" /></button>
@@ -3563,34 +4708,144 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <div class="quick-source-note"><strong>普通使用无需进入设置。</strong> CatVod 版本、日志和运行时等技术信息仍保留在高级设置中。</div>
+          <section class="settings-card aggregator-overview-card" style="margin-top: 18px;">
+            <div class="settings-card-heading">
+              <div class="settings-icon"><AppIcon name="sources" /></div>
+              <div style="flex: 1">
+                <h2>全网多源智能聚合引擎</h2>
+                <p>系统已接入 {{ selectableSites.length }} 个数据源（包含 {{ recommendedSourceCount }} 个极速优质源）。搜索与首页将自动全网并行优选，无需手动切换单个源。</p>
+              </div>
+              <button class="secondary-button" @click="sourcePoolExpanded = !sourcePoolExpanded"><AppIcon name="settings" :size="14" />{{ sourcePoolExpanded ? '收起底层站点' : '查看底层站点' }}</button>
+            </div>
+          </section>
+
+          <section v-if="sourcePoolExpanded" class="quick-source-section" style="margin-top: 20px;">
+            <div class="quick-source-section-heading"><div><h2>{{ sourcePageFilter === 'all' ? '全部内容来源' : sourcePageFilter === 'favorite' ? '收藏来源' : sourcePageFilter === 'recent' ? '最近使用' : sourcePageFilter === '4k' ? '4K 来源' : sourcePageFilter === 'quick' ? '秒播来源' : '采集来源' }}</h2><span>按收藏、最近使用、最近播放成功、推荐来源、搜索表现和响应速度排序</span></div><em>{{ sourcePageSites.length }}</em></div>
+            <label class="quick-source-search"><AppIcon name="search" :size="18" /><input v-model="sourcePageQuery" placeholder="搜索底层站点，例如：玩偶、4K、韩剧" /></label>
+            <div class="quick-source-tabs">
+              <button v-for="item in [{ key: 'all', label: '全部' }, { key: 'favorite', label: '收藏' }, { key: 'recent', label: '最近使用' }, { key: '4k', label: '4K' }, { key: 'quick', label: '秒播' }, { key: 'collect', label: '采集' }] as const" :key="item.key" :class="{ active: sourcePageFilter === item.key }" @click="sourcePageFilter = item.key">{{ item.label }}</button>
+            </div>
+            <div v-if="sourcePageSites.length" class="quick-source-grid" style="margin-top: 14px;">
+              <button v-for="site in sourcePageSites" :key="site.key" class="quick-source-card" :class="{ active: activeSite === site.key }" @click="selectSource(site.key)">
+                <span class="source-quick-icon" :class="`group-${sourceDisplayGroup(site)}`">{{ sourceGroupIcon(site) }}</span>
+                <span class="quick-source-card-copy"><strong>{{ site.name }}</strong><small>{{ sourceDescription(site) }}</small></span>
+                <span class="quick-source-state" :class="sourceStatusClass(site)"><i></i>{{ activeSite === site.key ? '当前' : sourceStatusText(site) }}</span>
+                <span class="source-favorite-toggle quick-source-favorite" :class="{ selected: isSourceFavorite(site.key) }" role="button" :aria-label="isSourceFavorite(site.key) ? '取消收藏来源' : '收藏来源'" @click.stop="toggleSourceFavorite(site.key)"><AppIcon name="heart" :size="13" /></span>
+                <span v-if="activeSite === site.key" class="quick-source-check"><AppIcon name="check" :size="14" /></span>
+              </button>
+            </div>
+            <div v-else class="empty-state compact-empty quick-source-empty"><div class="empty-icon"><AppIcon name="search" :size="26" /></div><h3>没有找到匹配站点</h3><p>尝试更换关键词或分类。</p></div>
+          </section>
+
+          <div class="quick-source-note" style="margin-top: 18px;"><strong>智能聚合说明：</strong> 影视订阅包只影响全网点播业务，电视直播独立管理互不干扰。</div>
+          </template>
+
+          <template v-else>
+            <section class="settings-card source-config-settings-card content-source-config-card">
+              <div class="settings-card-heading"><div class="settings-icon"><AppIcon name="plus" /></div><div><h2>添加电视直播配置</h2><p>支持直接导入 IPTV M3U 列表或直播源配置，拥有独立激活状态。</p></div></div>
+              <div class="source-config-import-form simplified-source-import-form">
+                <label class="source-config-url-field"><span>直播配置地址或本地路径</span><input v-model="liveConfigUrl" placeholder="M3U、TXT、JSON 或直播源配置链接" @keyup.enter="loadLiveConfig()" /></label>
+                <label><span>名称（可选）</span><input v-model="liveConfigName" placeholder="留空自动识别" /></label>
+                <button class="primary-button" :disabled="!liveConfigUrl.trim() || liveSourceManagementLoading" @click="loadLiveConfig()"><AppIcon name="plus" :size="15" />{{ liveSourceManagementLoading ? '正在导入…' : '导入并启用' }}</button>
+              </div>
+              <div v-if="liveCapableConfigs.length" class="source-config-settings-list">
+                <article v-for="config in liveCapableConfigs" :key="`live:${config.id ?? config.url}`" class="source-config-settings-row" :class="{ active: config.liveEnabled }">
+                  <span class="source-config-settings-icon"><AppIcon name="play" :size="17" /></span>
+                  <div v-if="editingConfigUrl === config.url" class="config-rename-row"><input v-model="editingConfigName" aria-label="配置名称" @keyup.enter="saveConfigName(config)" @keyup.esc="cancelRenameConfig" /><button class="compact-action primary" @click="saveConfigName(config)">保存</button><button class="compact-action" @click="cancelRenameConfig">取消</button></div>
+                  <div v-else class="source-config-settings-copy"><strong>{{ config.name }}</strong><span>{{ config.liveSourceCount ?? 0 }} 个直播源{{ config.siteCount ? ` · 同时包含 ${config.siteCount} 个点播源` : '' }}</span></div>
+                  <span class="source-config-settings-state">{{ config.liveEnabled ? '当前生效' : '可切换' }}</span>
+                  <button v-if="!config.liveEnabled" class="secondary-button" @click="activateLiveConfig(config)">启用直播</button>
+                  <button class="icon-button config-icon-button" title="重命名" @click="beginRenameConfig(config)"><AppIcon name="edit" :size="15" /></button>
+                  <button class="icon-button config-icon-button danger" :title="deletingConfigUrl === config.url ? '再次点击确认删除' : '删除配置'" @click="deleteConfig(config)"><AppIcon name="trash" :size="15" /></button>
+                </article>
+              </div>
+            </section>
+
+            <section class="settings-card source-config-settings-card live-source-management-card" style="margin-top: 18px;">
+              <div class="settings-card-heading"><div class="settings-icon"><AppIcon name="play" /></div><div><h2>当前生效直播源</h2><p>包含当前生效配置中的 M3U 频道列表与节目单。</p></div></div>
+              <div class="source-config-overview">
+                <div><span class="source-live-dot"></span><span><small>当前生效</small><strong>{{ activeLiveConfig?.name ?? '未选择直播配置' }}</strong></span><em>{{ activeLiveSourceCount }} 个直播源 · {{ activeLiveChannelCount }} 个已加载频道</em></div>
+                <small v-if="liveSourceMessage" class="replacement-registry-message">{{ liveSourceMessage }}</small>
+              </div>
+            </section>
+
+            <section class="quick-source-section live-source-list-section" style="margin-top: 18px;">
+              <div class="quick-source-section-heading"><div><h2>直播频道源明细</h2><span>仅影响电视直播频道播放</span></div><em>{{ liveSourceSummaries.length }}</em></div>
+              <div v-if="liveSourceSummaries.length" class="quick-source-grid live-source-summary-grid">
+                <article v-for="item in liveSourceSummaries" :key="item.id" class="quick-source-card live-source-summary-card" :class="{ active: item.boot, unavailable: item.error }">
+                  <span class="source-quick-icon group-quick"><AppIcon name="play" :size="18" /></span>
+                  <span class="quick-source-card-copy"><strong>{{ item.name }}</strong><small>{{ item.error ? item.error : `${item.format?.toUpperCase() ?? '待识别'} · ${item.channelCount} 个频道 · ${item.lineCount} 条线路` }}</small></span>
+                  <span class="quick-source-state" :class="item.error ? 'blocked' : item.loaded ? 'healthy' : 'unknown'"><i></i>{{ item.error ? '异常' : item.loaded ? '已加载' : '待加载' }}</span>
+                </article>
+              </div>
+              <div v-else class="empty-state compact-empty quick-source-empty"><div class="empty-icon"><AppIcon name="play" :size="26" /></div><h3>当前没有直播源</h3><p>在上方导入 M3U、TXT、JSON 或包含 lives 的配置。</p></div>
+            </section>
+
+            <div class="quick-source-note" style="margin-top: 18px;"><strong>独立说明：</strong> 直播源仅作用于电视直播频道，不改变点播影视推荐与历史。</div>
+          </template>
         </section>
 
         <section v-else-if="page === 'accounts'" class="page accounts-page">
           <div class="page-title-row account-page-title">
-            <div><small>ACCOUNTS</small><h1>账号与网盘</h1><p>只在需要时登录，应用会自动保存状态并用于播放网盘内容。</p></div>
+            <div><small>ACCOUNTS & CLOUD DRIVES</small><h1>账号与网盘</h1><p>主流网盘一键扫码绑定，用于极速直连与 4K 原画资源播放。</p></div>
             <button class="secondary-button" :disabled="panStatusLoading" @click="refreshPanStatus"><AppIcon name="refresh" :size="15" />{{ panStatusLoading ? '正在检查…' : '刷新状态' }}</button>
           </div>
 
           <small v-if="panAccountMessage" class="replacement-registry-message pan-account-message">{{ panAccountMessage }}</small>
+          
           <div class="pan-account-grid">
-            <section v-for="provider in PAN_PROVIDER_DEFINITIONS" :key="provider.id" class="pan-account-card" :class="[{ connected: panStatuses[provider.id]?.login }, `provider-${provider.id}`]">
+            <section v-for="provider in PAN_PROVIDER_DEFINITIONS.filter(p => !p.configOnly)" :key="provider.id" class="pan-account-card" :class="[{ connected: panStatuses[provider.id]?.login }, `provider-${provider.id}`]">
               <div class="pan-account-brand"><span>{{ provider.shortName }}</span></div>
               <div class="pan-account-copy">
-                <div class="pan-account-title"><h2>{{ provider.name }}</h2><em :class="{ connected: panStatuses[provider.id]?.accountState === 'connected', warning: panStatuses[provider.id]?.accountState === 'expired', unavailable: panStatuses[provider.id]?.accountState === 'unavailable' }">{{ panAccountStateLabel(panStatuses[provider.id]) }}</em></div>
-                <p>{{ provider.description }} 登录过程在应用内完成。</p>
-                <div class="pan-account-meta"><span>{{ panStatuses[provider.id]?.state ?? '尚未检查' }}</span><span v-if="panCredentialModeLabel(panStatuses[provider.id])">凭据：{{ panCredentialModeLabel(panStatuses[provider.id]) }}</span><span v-if="panStatuses[provider.id]?.checkedAt">检查于 {{ formatDate(panStatuses[provider.id]!.checkedAt) }}</span></div>
+                <div class="pan-account-title">
+                  <h2>{{ provider.name }}</h2>
+                  <em :class="{ connected: panStatuses[provider.id]?.login, warning: panStatuses[provider.id]?.accountState === 'expired', unavailable: !panStatuses[provider.id]?.login }">
+                    {{ panStatuses[provider.id]?.login ? '已授权绑定' : '未绑定' }}
+                  </em>
+                </div>
+                <p>{{ provider.description }}</p>
+                <div v-if="panStatuses[provider.id]?.login && panStatuses[provider.id]?.checkedAt" class="pan-account-meta">
+                  <span>已就绪</span>
+                  <span>检查于 {{ formatDate(panStatuses[provider.id]!.checkedAt) }}</span>
+                </div>
               </div>
               <div class="pan-account-actions">
-                <button v-for="option in provider.loginOptions" :key="option.provider" :class="provider.loginOptions.length > 1 ? 'secondary-button' : 'primary-button'" :disabled="panLoginLoading || panStatusLoading" @click="startPanLogin(provider.id, option.provider)"><AppIcon name="account" :size="16" />{{ panStatuses[provider.id]?.login && provider.loginOptions.length === 1 ? '重新登录' : option.label }}</button>
+                <button v-if="!panStatuses[provider.id]?.login" class="primary-button" :disabled="panLoginLoading || panStatusLoading" @click="startPanLogin(provider.id)"><AppIcon name="account" :size="16" />扫码绑定</button>
+                <button v-else class="secondary-button" :disabled="panLoginLoading || panStatusLoading" @click="startPanLogin(provider.id)"><AppIcon name="refresh" :size="15" />重新扫码</button>
                 <button v-if="panStatuses[provider.id]?.configured || panStatuses[provider.id]?.login" class="secondary-button danger-subtle" :disabled="panStatusLoading || panLoginLoading" @click="clearPanAccount(provider.id)"><AppIcon name="trash" :size="15" />清除凭据</button>
               </div>
             </section>
           </div>
 
-          <section class="account-privacy-note">
+          <section class="settings-card advanced-pan-card" style="margin-top: 24px;">
+            <div class="settings-card-heading" style="cursor: pointer" @click="advancedPanOpen = !advancedPanOpen">
+              <div class="settings-icon"><AppIcon name="settings" /></div>
+              <div style="flex: 1">
+                <h2>高级存储与第三方协议（123网盘 / 迅雷 / WebDAV）</h2>
+                <p>此类协议通常由底层自动化处理，普通用户无需额外配置。高级玩家可按需展开管理。</p>
+              </div>
+              <button class="secondary-button" @click.stop="advancedPanOpen = !advancedPanOpen">{{ advancedPanOpen ? '收起' : '展开管理' }}</button>
+            </div>
+            <div v-if="advancedPanOpen" class="advanced-pan-body" style="margin-top: 16px;">
+              <div class="pan-account-grid">
+                <section v-for="provider in PAN_PROVIDER_DEFINITIONS.filter(p => p.configOnly)" :key="provider.id" class="pan-account-card" :class="`provider-${provider.id}`">
+                  <div class="pan-account-brand"><span>{{ provider.shortName }}</span></div>
+                  <div class="pan-account-copy">
+                    <div class="pan-account-title"><h2>{{ provider.name }}</h2><em>{{ panAccountStateLabel(panStatuses[provider.id]) }}</em></div>
+                    <p>{{ provider.description }}</p>
+                  </div>
+                  <div class="pan-account-actions">
+                    <button class="secondary-button" :disabled="panStatusLoading || panLoginLoading" @click="openCatVodWebsite"><AppIcon name="settings" :size="16" />打开配置面板</button>
+                    <button v-if="panStatuses[provider.id]?.configured" class="secondary-button danger-subtle" :disabled="panStatusLoading || panLoginLoading" @click="clearPanAccount(provider.id)"><AppIcon name="trash" :size="15" />清除凭据</button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <section class="account-privacy-note" style="margin-top: 24px;">
             <AppIcon name="info" :size="18" />
-            <div><strong>凭据由主进程安全保存</strong><p>页面只显示登录状态，不读取或展示 Cookie、Token 和账号密码。二维码任务会在取消、过期或页面关闭后自动清理。</p></div>
+            <div><strong>凭据安全由本地安全存储托管</strong><p>页面仅展示授权状态，不展示敏感 Token。播放遇到网盘资源时将自动使用已授权状态高速直连。</p></div>
           </section>
         </section>
 
@@ -3599,7 +4854,7 @@ onBeforeUnmount(() => {
           <section class="settings-card">
             <div class="settings-card-heading"><div class="settings-icon"><AppIcon name="settings" /></div><div><h2>界面显示</h2><p>调整页面文字大小，修改后可立即预览。</p></div></div>
             <div class="setting-row"><div><strong>界面字体大小</strong><span>标准为默认舒适阅读字号，紧凑接近旧版密度</span></div><select v-model="fontSize"><option v-for="option in FONT_SIZE_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option></select></div>
-            <div class="setting-row"><div><strong>界面主题</strong><span>跟随系统会随 macOS 外观自动切换，也可以固定为深色或浅色</span></div><select v-model="themeMode"><option value="system">跟随系统</option><option value="dark">深色</option><option value="light">浅色</option></select></div>
+            <div class="setting-row"><div><strong>界面主题</strong><span>跟随系统会随系统外观自动切换，也可以固定为深色或浅色</span></div><select v-model="themeMode"><option value="system">跟随系统</option><option value="dark">深色</option><option value="light">浅色</option></select></div>
             <div class="setting-row"><div><strong>首页推荐自动轮播</strong><span>每 6 秒切换一条最近热播内容，鼠标悬停和窗口失焦时自动暂停</span></div><select v-model="homeCarouselEnabled"><option :value="true">开启</option><option :value="false">关闭</option></select></div>
           </section>
           <section class="settings-card">
@@ -3734,6 +4989,17 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
+    <section v-if="liveOpening && !playing" class="live-opening-layer" aria-live="polite">
+      <div class="live-opening-card">
+        <span class="live-opening-pulse"><AppIcon name="play" :size="34" /></span>
+        <small>LIVE · 正在进入直播</small>
+        <h2>{{ liveOpening.channelName }}</h2>
+        <p>{{ playbackStatus || `正在从“${liveOpening.sourceName}”连接频道并等待首帧…` }}</p>
+        <div class="live-opening-progress"><i></i></div>
+        <button class="secondary-button" @click="cancelSniff">取消并返回选台</button>
+      </div>
+    </section>
+
     <PlayerContainer
       v-if="playing"
       :engine="webPlayerEngine"
@@ -3742,8 +5008,12 @@ onBeforeUnmount(() => {
       :compatibility-fallback-mode="compatibilityFallbackMode"
       :episodes="playingNavigation?.episodes ?? []"
       :current-episode-url="playing.episodeUrl"
-      :has-previous="Boolean(playingNavigation?.previous)"
-      :has-next="Boolean(playingNavigation?.next)"
+      :has-previous="playing.contentKind === 'live' ? liveHasChannelNavigation : Boolean(playingNavigation?.previous)"
+      :has-next="playing.contentKind === 'live' ? liveHasChannelNavigation : Boolean(playingNavigation?.next)"
+      :live-lines="livePlayerLines"
+      :current-live-line-id="playing.live?.lineId ?? ''"
+      :live-channels="livePlayerChannels"
+      :current-live-channel-id="playing.live?.channelId ?? ''"
       :danmaku-settings="danmakuSettings"
       :subtitle-settings="subtitleSettings"
       @progress="saveEmbeddedProgress"
@@ -3755,6 +5025,14 @@ onBeforeUnmount(() => {
       @fallback="fallbackEmbeddedPlayback"
       @reprepare="handleWebPlayerReprepare"
       @compatibility-failure="handleCompatibilityPlaybackFailure"
+      @ready="handleLivePlaybackReady"
+      @buffering="handleLiveBuffering"
+      @timeshift="startLiveTimeshift"
+      @go-live="returnToLiveEdge"
+      @select-live-line="selectLivePlaybackLine"
+      @select-live-channel="selectLivePlaybackChannel"
+      @reconnect-live="reconnectLivePlayback"
+      @open-live-guide="openLiveProgrammeGuide"
       @engine-fallback="handleWebPlayerEngineFallback"
     />
     <div v-if="playing && pendingSourceImport" class="pending-source-switch-banner">

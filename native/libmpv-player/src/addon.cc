@@ -36,8 +36,20 @@ napi_value String(napi_env env, const std::string& input) {
 }
 
 std::string ToString(napi_env env, napi_value value) {
+  napi_valuetype type;
+  napi_typeof(env, value, &type);
+  if (type == napi_number) {
+    double num = 0;
+    napi_get_value_double(env, value, &num);
+    if (num == static_cast<int64_t>(num)) {
+      return std::to_string(static_cast<int64_t>(num));
+    }
+    return std::to_string(num);
+  }
   size_t length = 0;
-  napi_get_value_string_utf8(env, value, nullptr, 0, &length);
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) {
+    return "";
+  }
   std::string buffer(length + 1, '\0');
   napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length);
   buffer.resize(length);
@@ -125,20 +137,26 @@ napi_value StateToObject(napi_env env, const fongmi::NativePlayerState& state) {
   napi_set_named_property(env, object, "volume", Number(env, state.volume));
   napi_set_named_property(env, object, "paused", Boolean(env, state.paused));
   napi_set_named_property(env, object, "muted", Boolean(env, state.muted));
+  napi_set_named_property(env, object, "buffering", Boolean(env, state.buffering));
+  napi_set_named_property(env, object, "cachePercent", Number(env, state.cachePercent));
+  napi_set_named_property(env, object, "videoReady", Boolean(env, state.videoReady));
   napi_set_named_property(env, object, "stopped", Boolean(env, state.stopped));
   return object;
 }
 
 napi_value MethodLoad(napi_env env, napi_callback_info info) {
-  size_t argc = 2;
-  napi_value args[2];
+  size_t argc = 3;
+  napi_value args[3];
   auto* player = UnwrapPlayer(env, info, &argc, args);
   if (!player || argc < 1) {
     ThrowError(env, "load 需要播放地址");
     return Undefined(env);
   }
   try {
-    player->Load(ToString(env, args[0]), argc > 1 ? HeadersFromValue(env, args[1]) : std::unordered_map<std::string, std::string>{});
+    player->Load(
+        ToString(env, args[0]),
+        argc > 1 ? HeadersFromValue(env, args[1]) : std::unordered_map<std::string, std::string>{},
+        argc > 2 && ToBoolean(env, args[2]));
   } catch (const std::exception& error) {
     ThrowError(env, error.what());
   }
@@ -198,6 +216,90 @@ napi_value MethodSetMuted(napi_env env, napi_callback_info info) {
   napi_value args[1];
   auto* player = UnwrapPlayer(env, info, &argc, args);
   if (player && argc > 0) player->SetMuted(ToBoolean(env, args[0]));
+  return Undefined(env);
+}
+
+napi_value MethodSetSubtitleTrack(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  auto* player = UnwrapPlayer(env, info, &argc, args);
+  if (player && argc > 0) {
+    try {
+      player->SetSubtitleTrack(ToString(env, args[0]));
+    } catch (const std::exception& error) {
+      ThrowError(env, error.what());
+    }
+  }
+  return Undefined(env);
+}
+
+napi_value MethodSetSubtitleDelay(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  auto* player = UnwrapPlayer(env, info, &argc, args);
+  if (player && argc > 0) {
+    try {
+      player->SetSubtitleDelay(ToNumber(env, args[0]));
+    } catch (const std::exception& error) {
+      ThrowError(env, error.what());
+    }
+  }
+  return Undefined(env);
+}
+
+napi_value MethodSetSubtitleVisibility(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  auto* player = UnwrapPlayer(env, info, &argc, args);
+  if (player && argc > 0) {
+    try {
+      player->SetSubtitleVisibility(ToBoolean(env, args[0]));
+    } catch (const std::exception& error) {
+      ThrowError(env, error.what());
+    }
+  }
+  return Undefined(env);
+}
+
+napi_value MethodAddSubtitle(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  auto* player = UnwrapPlayer(env, info, &argc, args);
+  if (player && argc > 0) {
+    try {
+      player->AddSubtitle(ToString(env, args[0]));
+    } catch (const std::exception& error) {
+      ThrowError(env, error.what());
+    }
+  }
+  return Undefined(env);
+}
+
+napi_value MethodSetAudioTrack(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  auto* player = UnwrapPlayer(env, info, &argc, args);
+  if (player && argc > 0) {
+    try {
+      player->SetAudioTrack(ToString(env, args[0]));
+    } catch (const std::exception& error) {
+      ThrowError(env, error.what());
+    }
+  }
+  return Undefined(env);
+}
+
+napi_value MethodSetAspectRatio(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
+  auto* player = UnwrapPlayer(env, info, &argc, args);
+  if (player && argc > 0) {
+    try {
+      player->SetAspectRatio(ToString(env, args[0]));
+    } catch (const std::exception& error) {
+      ThrowError(env, error.what());
+    }
+  }
   return Undefined(env);
 }
 
@@ -289,6 +391,12 @@ napi_value CreatePlayer(napi_env env, napi_callback_info /*info*/) {
   DefineMethod(env, object, "setSpeed", MethodSetSpeed);
   DefineMethod(env, object, "setVolume", MethodSetVolume);
   DefineMethod(env, object, "setMuted", MethodSetMuted);
+  DefineMethod(env, object, "setSubtitleTrack", MethodSetSubtitleTrack);
+  DefineMethod(env, object, "setSubtitleDelay", MethodSetSubtitleDelay);
+  DefineMethod(env, object, "setSubtitleVisibility", MethodSetSubtitleVisibility);
+  DefineMethod(env, object, "addSubtitle", MethodAddSubtitle);
+  DefineMethod(env, object, "setAudioTrack", MethodSetAudioTrack);
+  DefineMethod(env, object, "setAspectRatio", MethodSetAspectRatio);
   DefineMethod(env, object, "attachView", MethodAttachView);
   DefineMethod(env, object, "resizeView", MethodResizeView);
   DefineMethod(env, object, "detachView", MethodDetachView);

@@ -23,6 +23,7 @@ defineProps<{
     | "grid"
     | "edit"
     | "trash"
+    | "pin"
     | "info";
   size?: number;
 }>();
@@ -127,6 +128,9 @@ defineProps<{
     </template>
     <template v-else-if="name === 'trash'">
       <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+    </template>
+    <template v-else-if="name === 'pin'">
+      <path d="M12 17v5M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z" />
     </template>
     <template v-else>
       <circle cx="12" cy="12" r="9" />

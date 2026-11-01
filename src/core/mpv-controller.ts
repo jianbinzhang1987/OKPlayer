@@ -135,7 +135,7 @@ export class MpvController {
     }
   }
 
-  async load(url: string, headers: Record<string, string> = {}) {
+  async load(url: string, headers: Record<string, string> = {}, _options: { profile?: "default" | "live" } = {}) {
     const headerFields = formatHttpHeaderFields(headers);
     const userAgent = headerValue(headers, "user-agent") || "Mozilla/5.0";
     const referrer = headerValue(headers, "referer") || headerValue(headers, "referrer");
@@ -179,6 +179,46 @@ export class MpvController {
 
   setMuted(muted: boolean) {
     return this.command(["set_property", "mute", Boolean(muted)]);
+  }
+
+  setSubtitleTrack(track: number | string) {
+    return this.command(["set_property", "sid", track]);
+  }
+
+  setSubtitleDelay(seconds: number) {
+    return this.command(["set_property", "sub-delay", Number(seconds) || 0]);
+  }
+
+  setSubtitleVisibility(visible: boolean) {
+    return this.command(["set_property", "sub-visibility", Boolean(visible)]);
+  }
+
+  addSubtitle(url: string) {
+    return this.command(["sub-add", url, "select"]);
+  }
+
+  setAudioTrack(track: number | string) {
+    if (track === "cycle" || track === "next") {
+      return this.command(["cycle", "aid"]);
+    }
+    return this.command(["set_property", "aid", track]);
+  }
+
+  setAspectRatio(ratio: string) {
+    if (ratio === "stretch") {
+      return this.command(["set_property", "keepaspect", false]);
+    }
+    const commands = [
+      this.command(["set_property", "keepaspect", true]),
+    ];
+    if (ratio === "16:9" || ratio === "16/9") {
+      commands.push(this.command(["set_property", "video-aspect-override", "16:9"]));
+    } else if (ratio === "4:3" || ratio === "4/3") {
+      commands.push(this.command(["set_property", "video-aspect-override", "4:3"]));
+    } else {
+      commands.push(this.command(["set_property", "video-aspect-override", "-1"]));
+    }
+    return Promise.all(commands);
   }
 
   observeProperty(id: number, name: string) {

@@ -66,6 +66,112 @@ test("desktop playback prepares an opaque embedded session and supports fallback
   assert.deepEqual(fixture.service.close(prepared.sessionId), { closed: true });
 });
 
+test("direct IPTV media bypasses VOD resolution and preserves live headers", async () => {
+  let sourceResolveCalls = 0;
+  let probeCalls = 0;
+  let playbackProfile = "";
+  const sessions = new PlaybackSessionStore();
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => {
+        sourceResolveCalls += 1;
+        throw new Error("直播直链不应调用点播解析");
+      },
+      playerResult: async () => { throw new Error("直播直链不应调用网页嗅探"); },
+      getConfig: () => ({ ads: [] }),
+    },
+    {
+      open: async (_url: string, _headers?: Record<string, string>, options?: { profile?: "default" | "live" }) => {
+        playbackProfile = options?.profile ?? "";
+      },
+      stop: async () => undefined,
+    },
+    { sniff: async () => { throw new Error("直播直链不应调用网页嗅探"); }, cancel: () => undefined },
+    sessions,
+    async (url: string) => {
+      probeCalls += 1;
+      return { ok: true, url, statusCode: 200, mimeType: "application/vnd.apple.mpegurl", bytesRead: 64, format: "hls", reason: "ok" };
+    },
+    undefined,
+    (session) => ({ url: session.sourceUrl, headers: session.headers, profile: session.contentKind === "live" ? "live" : "default" }),
+  );
+
+  const prepared = await service.prepare({
+    siteKey: "live-source",
+    flag: "主线路",
+    episodeUrl: "https://live.example.com/cctv1.m3u8",
+    playbackMode: "compatibility",
+    directMedia: {
+      url: "https://live.example.com/cctv1.m3u8",
+      headers: { Referer: "https://portal.example.com/", "User-Agent": "IPTV-Test" },
+      format: "hls",
+      contentKind: "live",
+    },
+  });
+
+  assert.equal(sourceResolveCalls, 0);
+  assert.equal(probeCalls, 0);
+  assert.equal(prepared.contentKind, "live");
+  assert.equal(prepared.engine, "mpv");
+  await service.fallback(prepared.sessionId);
+  assert.equal(playbackProfile, "live");
+  assert.equal(sessions.get(prepared.sessionId).headers.Referer, "https://portal.example.com/");
+  assert.equal(sessions.get(prepared.sessionId).headers["User-Agent"], "IPTV-Test");
+});
+
+test("RTMP and RTSP live media route directly to the native live profile while UDP stays disabled", async () => {
+  const opened: Array<{ url: string; profile?: string }> = [];
+  const service = new DesktopPlaybackService(
+    {
+      resolve: async () => { throw new Error("直播直链不应调用点播解析"); },
+      playerResult: async () => { throw new Error("直播直链不应调用网页嗅探"); },
+      getConfig: () => ({ ads: [] }),
+    },
+    {
+      open: async (url: string, _headers?: Record<string, string>, options?: { profile?: "default" | "live" }) => {
+        opened.push({ url, profile: options?.profile });
+      },
+      stop: async () => undefined,
+    },
+    { sniff: async () => { throw new Error("直播直链不应调用网页嗅探"); }, cancel: () => undefined },
+    new PlaybackSessionStore(),
+    undefined,
+    undefined,
+    (session) => ({ url: session.sourceUrl, headers: session.headers, profile: session.contentKind === "live" ? "live" : "default" }),
+  );
+
+  const rtmp = await service.prepare({
+    siteKey: "live-source",
+    flag: "RTMP",
+    episodeUrl: "rtmp://live.example.com/channel",
+    playbackMode: "compatibility",
+    directMedia: { url: "rtmp://live.example.com/channel", headers: {}, contentKind: "live" },
+  });
+  await service.fallback(rtmp.sessionId);
+  assert.deepEqual(opened[0], { url: "rtmp://live.example.com/channel", profile: "live" });
+
+  const rtsp = await service.prepare({
+    siteKey: "live-source",
+    flag: "RTSP",
+    episodeUrl: "rtsp://camera.example.com/stream",
+    playbackMode: "compatibility",
+    directMedia: { url: "rtsp://camera.example.com/stream", headers: {}, contentKind: "live" },
+  });
+  await service.fallback(rtsp.sessionId);
+  assert.deepEqual(opened[1], { url: "rtsp://camera.example.com/stream", profile: "live" });
+
+  await assert.rejects(
+    service.prepare({
+      siteKey: "live-source",
+      flag: "UDP",
+      episodeUrl: "udp://239.0.0.1:1234",
+      playbackMode: "compatibility",
+      directMedia: { url: "udp://239.0.0.1:1234", headers: {}, contentKind: "live" },
+    }),
+    /UDP\/RTP 默认关闭/,
+  );
+});
+
 test("web playback can consume media through the loopback HTTP gateway", async () => {
   const fixture = createServices();
   const service = new DesktopPlaybackService(

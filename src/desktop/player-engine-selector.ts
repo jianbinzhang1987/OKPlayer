@@ -67,7 +67,7 @@ export function selectPlaybackEngine(input: PlaybackEngineSelectionInput): Playb
 function isPanOriginalLine(input: Pick<PlaybackEngineSelectionInput, "siteKey" | "flag">): boolean {
   const context = `${input.siteKey ?? ""} ${input.flag ?? ""}`;
   return /原画/i.test(context)
-    && /夸克|quark|(?:^|\W)uc(?:\W|$)|百度|baidu|(?:^|\D)115(?:\D|$)|pan115|天翼|pan189|移动云盘|pan139/i.test(context);
+    && /夸克|quark|(?:^|\W)uc(?:\W|$)|百度|baidu|(?:^|\D)115(?:\D|$)|pan115|123网盘|pan123|(?:^|\s)123(?:原画|极速|超清|无损|\s|$)|天翼|pan189|移动云盘|pan139|光鸭|guangya|迅雷|xunlei|thunder/i.test(context);
 }
 
 function extensionOf(value: string): string {

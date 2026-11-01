@@ -27,6 +27,15 @@ test("netdisk original-quality mp4 prefers libmpv while HLS stays on the web eng
     siteKey: "catvod:nodejs_duoduo",
     flag: "百度原画",
   }), "mpv");
+  for (const [siteKey, flag] of [["catvod:pan123", "123 原画"], ["catvod:guangya", "光鸭原画"], ["catvod:thunder", "迅雷原画"]] as const) {
+    assert.equal(selectPlaybackEngine({
+      format: "mp4",
+      sourceUrl: "https://cdn.example.com/opaque-pan-file",
+      headers: { Authorization: "redacted" },
+      siteKey,
+      flag,
+    }), "mpv");
+  }
 });
 
 test("explicit compatibility mode still forces the native mpv kernel", () => {

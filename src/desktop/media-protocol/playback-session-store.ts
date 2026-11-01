@@ -25,6 +25,7 @@ export interface PlaybackSession {
   headers: HeadersMap;
   format: PlaybackMediaFormat;
   resolvedBy: ResolvedMedia["resolvedBy"];
+  contentKind?: ResolvedMedia["contentKind"];
   metadata: PlaybackMetadata;
   resources: Map<string, PlaybackResource>;
   createdAt: number;
@@ -61,6 +62,7 @@ export class PlaybackSessionStore {
       headers: { ...media.headers },
       format,
       resolvedBy: media.resolvedBy,
+      ...(media.contentKind ? { contentKind: media.contentKind } : {}),
       metadata: { ...metadata },
       resources: new Map([[ROOT_RESOURCE_ID, root]]),
       resourceIndex: new Map([[resourceIndexKey(media.url, rootKind), ROOT_RESOURCE_ID]]),

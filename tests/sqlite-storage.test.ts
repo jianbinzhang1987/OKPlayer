@@ -31,6 +31,35 @@ test("sqlite persists configs, history, favorites and settings", () => {
     updatedAt: 2,
   });
   db.saveFavorite({ siteKey: "s", vodId: "1", vodName: "测试影片", createdAt: 1 });
+  db.saveLiveFavorite({ sourceId: "live-source", channelId: "cctv1", channelName: "CCTV-1", createdAt: 4 });
+  db.saveLiveRecent({ sourceId: "live-source", channelId: "cctv1", channelName: "CCTV-1", lineId: "line-1", watchedAt: 5 });
+  db.saveLiveRecent({ sourceId: "live-source", channelId: "cctv1", channelName: "CCTV-1 综合", lineId: "line-2", watchedAt: 6 });
+  db.saveLiveCatchupHistory({
+    sourceId: "live-source",
+    channelId: "cctv1",
+    programmeStartAt: 1_754_132_400_000,
+    programmeEndAt: 1_754_136_000_000,
+    programmeTitle: "新闻联播",
+    position: 620,
+    duration: 1_800,
+    completed: false,
+    updatedAt: 7,
+  });
+  const probedLine = db.saveLiveLineProbe("live-source", "cctv1", "line-2", "线路 2", {
+    state: "available",
+    score: 80,
+    checkedAt: Date.now(),
+    latencyMs: 420,
+    segmentVerified: true,
+    reason: "清单和直播分片均验证通过",
+  });
+  assert.equal(probedLine.score, 80);
+  db.recordLiveLinePlayback({ sourceId: "live-source", channelId: "cctv1", lineId: "line-2", lineName: "线路 2", kind: "started", startupMs: 650, occurredAt: Date.now() });
+  db.recordLiveLinePlayback({ sourceId: "live-source", channelId: "cctv1", lineId: "line-2", lineName: "线路 2", kind: "stable", playedSeconds: 620, occurredAt: Date.now() });
+  db.recordLiveLinePlayback({ sourceId: "live-source", channelId: "cctv1", lineId: "line-2", lineName: "线路 2", kind: "buffering", bufferingCount: 2, bufferingDurationMs: 4_500, occurredAt: Date.now() });
+  db.recordLiveLinePlayback({ sourceId: "live-source", channelId: "cctv1", lineId: "line-2", lineName: "线路 2", kind: "failover-success", occurredAt: Date.now() });
+  db.recordLiveLinePlayback({ sourceId: "live-source", channelId: "cctv1", lineId: "line-2", lineName: "线路 2", kind: "failover-failure", occurredAt: Date.now() });
+  db.recordLiveLinePlayback({ sourceId: "live-source", channelId: "cctv1", lineId: "line-2", lineName: "线路 2", kind: "failure", reason: "连接中断", occurredAt: Date.now() });
   db.saveSourceQuality({
     configSource: "https://example.com/config.json",
     siteKey: "s",
@@ -60,6 +89,20 @@ test("sqlite persists configs, history, favorites and settings", () => {
   assert.equal(db.listHistory()[0]?.position, 80);
   assert.equal(db.isFavorite("s", "1"), true);
   assert.equal(db.getSetting("speed", 1), 1.5);
+  assert.equal(db.listLiveFavorites()[0]?.channelName, "CCTV-1");
+  assert.equal(db.listLiveRecent()[0]?.channelName, "CCTV-1 综合");
+  assert.equal(db.listLiveRecent()[0]?.lineId, "line-2");
+  assert.equal(db.getLiveCatchupHistory("live-source", "cctv1", 1_754_132_400_000)?.position, 620);
+  assert.equal(db.getLiveCatchupHistory("live-source", "cctv1", 1_754_132_400_000)?.completed, false);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.playbackSuccessCount, 1);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.playbackFailureCount, 1);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.startupSamples, 1);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.stablePlaybackSeconds, 620);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.bufferingCount, 2);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.bufferingDurationMs, 4_500);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.failoverSuccessCount, 1);
+  assert.equal(db.getLiveLineQuality("live-source", "cctv1", "line-2")?.failoverFailureCount, 1);
+  assert.ok((db.getLiveLineQuality("live-source", "cctv1", "line-2")?.score ?? 0) > 35);
   assert.equal(db.getSourceQuality("https://example.com/config.json", "s")?.state, "blocked");
   assert.equal(db.getSourceQuality("https://example.com/config.json", "s")?.searchSuccessCount, 2);
   assert.equal(db.getSourceQuality("https://example.com/config.json", "s")?.lastMediaSuccessAt, 12);
@@ -67,6 +110,10 @@ test("sqlite persists configs, history, favorites and settings", () => {
 
   db.removeFavorite("s", "1");
   assert.equal(db.isFavorite("s", "1"), false);
+  db.removeLiveFavorite("live-source", "cctv1");
+  assert.equal(db.listLiveFavorites().length, 0);
+  db.removeLiveCatchupHistory("live-source", "cctv1", 1_754_132_400_000);
+  assert.equal(db.getLiveCatchupHistory("live-source", "cctv1", 1_754_132_400_000), undefined);
   db.removeHistory("s", "1", "第01集");
   assert.equal(db.listHistory().length, 0);
   db.deleteConfig("https://example.com/backup.json");

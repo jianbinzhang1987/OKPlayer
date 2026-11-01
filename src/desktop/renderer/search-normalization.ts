@@ -13,7 +13,7 @@ export interface SearchMediaGroup<T extends SearchMediaLike> {
 }
 
 const QUALITY_TOKEN_PATTERN = /(?:4k|8k|2160p|1080p|720p|蓝光|超清|高清|原画|高码率|hdr10?\+?|hdr|dolby|杜比|web[-_. ]?dl|webrip|bluray|bdrip|remux|hevc|x26[45]|h26[45]|aac|dts|国语|国粤双语|粤语|中字|字幕|内嵌|简中|繁中|无水印|修复版|加长版|导演剪辑版)/ig;
-const SOURCE_TOKEN_PATTERN = /(?:夸克|阿里|百度|天翼|115|uc|网盘|云盘|秒播|极速|直连|采集|线路)/ig;
+const SOURCE_TOKEN_PATTERN = /(?:夸克|阿里|百度|天翼|115|123|光鸭|迅雷|xunlei|thunder|uc|网盘|云盘|秒播|极速|直连|采集|线路)/ig;
 const BRACKET_PATTERN = /[\[【（(][^\]】）)]*[\]】）)]/g;
 const YEAR_PATTERN = /(?:19|20)\d{2}/g;
 const SEASON_PATTERNS = [
@@ -139,7 +139,7 @@ function chineseNumber(value: string): number {
 
 function isNoiseBlock(value: string): boolean {
   return /(?:4k|8k|2160p|1080p|720p|蓝光|超清|高清|原画|高码率|hdr|dolby|杜比|web[-_. ]?dl|webrip|bluray|remux|hevc|x26[45]|h26[45]|aac|dts)/i.test(value)
-    || /(?:夸克|阿里|百度|天翼|115|uc|网盘|云盘|秒播|极速|直连|采集|线路)/i.test(value)
+    || /(?:夸克|阿里|百度|天翼|115|123|光鸭|迅雷|xunlei|thunder|uc|网盘|云盘|秒播|极速|直连|采集|线路)/i.test(value)
     || /(?:19|20)\d{2}/.test(value)
     || /(?:国语|粤语|中字|字幕|全集|完结|\d+\s*集)/i.test(value);
 }

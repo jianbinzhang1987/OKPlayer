@@ -21,10 +21,112 @@ namespace {
 constexpr int MPV_FORMAT_FLAG = 3;
 constexpr int MPV_FORMAT_DOUBLE = 5;
 
+#if defined(_WIN32)
+std::string WideToUtf8(const std::wstring& value) {
+  if (value.empty()) return {};
+  const int required = WideCharToMultiByte(
+    CP_UTF8,
+    0,
+    value.data(),
+    static_cast<int>(value.size()),
+    nullptr,
+    0,
+    nullptr,
+    nullptr
+  );
+  if (required <= 0) return {};
+  std::string result(static_cast<std::size_t>(required), '\0');
+  WideCharToMultiByte(
+    CP_UTF8,
+    0,
+    value.data(),
+    static_cast<int>(value.size()),
+    result.data(),
+    required,
+    nullptr,
+    nullptr
+  );
+  return result;
+}
+
+std::wstring Utf8ToWide(const std::string& value) {
+  if (value.empty()) return {};
+  int required = MultiByteToWideChar(
+    CP_UTF8,
+    MB_ERR_INVALID_CHARS,
+    value.data(),
+    static_cast<int>(value.size()),
+    nullptr,
+    0
+  );
+  UINT code_page = CP_UTF8;
+  DWORD flags = MB_ERR_INVALID_CHARS;
+  if (required <= 0) {
+    code_page = CP_ACP;
+    flags = 0;
+    required = MultiByteToWideChar(
+      code_page,
+      flags,
+      value.data(),
+      static_cast<int>(value.size()),
+      nullptr,
+      0
+    );
+  }
+  if (required <= 0) return {};
+  std::wstring result(static_cast<std::size_t>(required), L'\0');
+  MultiByteToWideChar(
+    code_page,
+    flags,
+    value.data(),
+    static_cast<int>(value.size()),
+    result.data(),
+    required
+  );
+  return result;
+}
+
+std::string ReadManagedLibmpvPath() {
+  const DWORD required = GetEnvironmentVariableW(L"FONGMI_LIBMPV_LIBRARY", nullptr, 0);
+  if (required == 0) return {};
+  std::wstring value(static_cast<std::size_t>(required), L'\0');
+  const DWORD written = GetEnvironmentVariableW(
+    L"FONGMI_LIBMPV_LIBRARY",
+    value.data(),
+    required
+  );
+  if (written == 0 || written >= required) return {};
+  value.resize(static_cast<std::size_t>(written));
+  return WideToUtf8(value);
+}
+#endif
+
 void* OpenLibrary(const std::string& path, std::string* error) {
 #if defined(_WIN32)
-  HMODULE handle = LoadLibraryA(path.c_str());
-  if (!handle && error) *error = "LoadLibrary failed";
+  const std::wstring wide_path = Utf8ToWide(path);
+  if (wide_path.empty()) {
+    if (error) *error = "libmpv 路径无法转换为 Windows Unicode 路径";
+    return nullptr;
+  }
+
+  // LoadLibrary with a full path does not reliably use that DLL's directory
+  // when resolving its transitive dependencies. libmpv ships beside FFmpeg,
+  // shader and codec DLLs, so explicitly include the selected DLL directory.
+  HMODULE handle = LoadLibraryExW(
+    wide_path.c_str(),
+    nullptr,
+    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+  );
+  DWORD load_error = handle ? ERROR_SUCCESS : GetLastError();
+  if (!handle) {
+    // Compatibility fallback for systems where the modern search flags are
+    // unavailable or restricted. The managed path is always absolute.
+    handle = LoadLibraryExW(wide_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!handle) load_error = GetLastError();
+  }
+  if (!handle && error) {
+    *error = "LoadLibraryExW failed for managed libmpv (Win32 error " + std::to_string(load_error) + ")";
+  }
   return reinterpret_cast<void*>(handle);
 #else
   // dlerror() returns the current thread-local loader error and clears it.
@@ -84,10 +186,21 @@ std::vector<std::string> DefaultLibmpvCandidates() {
   // A Homebrew or system libmpv can pull in a very large, incompatible
   // dependency graph and may block the Electron main process during dlopen.
   // Only a release-managed, explicitly selected absolute path is allowed.
+#if defined(_WIN32)
+  const std::string managed_path = ReadManagedLibmpvPath();
+  if (!managed_path.empty()) {
+    const std::filesystem::path selected = std::filesystem::u8path(managed_path);
+    if (selected.is_absolute()) {
+      const std::string normalized = WideToUtf8(selected.lexically_normal().native());
+      if (!normalized.empty()) candidates.emplace_back(normalized);
+    }
+  }
+#else
   if (const char* env = std::getenv("FONGMI_LIBMPV_LIBRARY")) {
     const std::filesystem::path selected(env);
     if (*env && selected.is_absolute()) candidates.emplace_back(selected.lexically_normal().string());
   }
+#endif
   return candidates;
 }
 

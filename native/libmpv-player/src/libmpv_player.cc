@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <stdexcept>
 
 namespace fongmi {
@@ -67,7 +68,7 @@ void LibmpvPlayer::Command(const std::vector<std::string>& args) {
   ThrowMpvError(library, "执行 libmpv 命令", library.command(mpv_, args));
 }
 
-void LibmpvPlayer::Load(const std::string& url, const std::unordered_map<std::string, std::string>& headers) {
+void LibmpvPlayer::Load(const std::string& url, const std::unordered_map<std::string, std::string>& headers, bool live) {
   if (destroyed_) throw std::runtime_error("播放器已经释放");
   if (url.empty()) throw std::runtime_error("播放地址不能为空");
   EnsureMpv();
@@ -75,6 +76,7 @@ void LibmpvPlayer::Load(const std::string& url, const std::unordered_map<std::st
   state_.position = 0;
   state_.duration = 0;
   state_.paused = false;
+  state_.videoReady = false;
   state_.stopped = false;
   if (using_mpv_) {
     const std::string user_agent = HeaderValue(headers, "user-agent");
@@ -88,6 +90,30 @@ void LibmpvPlayer::Load(const std::string& url, const std::unordered_map<std::st
     Command({"set", "user-agent", user_agent.empty() ? "Mozilla/5.0" : user_agent});
     Command({"set", "referrer", referrer});
     Command({"set", "http-header-fields", header_fields});
+    // Netdisk/VOD playback needs a generous cache to survive slow range
+    // round-trips, while live playback must balance fast startup with enough
+    // headroom for CDN and Wi-Fi jitter. Restore the appropriate profile
+    // before every load because one libmpv instance is reused across both
+    // content kinds.
+    if (live) {
+      const bool realtime_transport = url.rfind("rtmp://", 0) == 0 || url.rfind("rtsp://", 0) == 0;
+      // Do not wait for the entire cache before showing the first frame. Once
+      // playback has started, however, let mpv briefly pause and refill after
+      // an underrun instead of rendering a visibly jerky stream frame by frame.
+      Command({"set", "demuxer-readahead-secs", realtime_transport ? "3" : "12"});
+      Command({"set", "demuxer-max-bytes", realtime_transport ? "32MiB" : "96MiB"});
+      Command({"set", "cache-secs", realtime_transport ? "6" : "20"});
+      Command({"set", "cache-pause", "yes"});
+      Command({"set", "cache-pause-initial", "no"});
+      Command({"set", "cache-pause-wait", realtime_transport ? "1" : "2"});
+    } else {
+      Command({"set", "demuxer-readahead-secs", "60"});
+      Command({"set", "demuxer-max-bytes", "512MiB"});
+      Command({"set", "cache-secs", "300"});
+      Command({"set", "cache-pause", "yes"});
+      Command({"set", "cache-pause-initial", "no"});
+      Command({"set", "cache-pause-wait", "1"});
+    }
     Command({"loadfile", url, "replace"});
   }
 }
@@ -137,6 +163,55 @@ void LibmpvPlayer::SetMuted(bool muted) {
   if (using_mpv_) ThrowMpvError(MpvDynamicLibrary::Instance(), "设置静音", MpvDynamicLibrary::Instance().setFlag(mpv_, "mute", muted));
 }
 
+void LibmpvPlayer::SetSubtitleTrack(const std::string& track) {
+  if (destroyed_ || !using_mpv_ || !mpv_) return;
+  Command({"set", "sid", track.empty() ? "no" : track});
+}
+
+void LibmpvPlayer::SetSubtitleDelay(double seconds) {
+  if (destroyed_ || !using_mpv_ || !mpv_) return;
+  if (!std::isfinite(seconds)) return;
+  ThrowMpvError(MpvDynamicLibrary::Instance(), "设置字幕延迟",
+                MpvDynamicLibrary::Instance().setDouble(mpv_, "sub-delay", seconds));
+}
+
+void LibmpvPlayer::SetSubtitleVisibility(bool visible) {
+  if (destroyed_ || !using_mpv_ || !mpv_) return;
+  ThrowMpvError(MpvDynamicLibrary::Instance(), "设置字幕显示状态",
+                MpvDynamicLibrary::Instance().setFlag(mpv_, "sub-visibility", visible));
+}
+
+void LibmpvPlayer::AddSubtitle(const std::string& url) {
+  if (destroyed_ || !using_mpv_ || !mpv_ || url.empty()) return;
+  Command({"sub-add", url, "select"});
+}
+
+void LibmpvPlayer::SetAudioTrack(const std::string& track) {
+  if (destroyed_ || !using_mpv_ || !mpv_) return;
+  if (track == "cycle" || track == "next") {
+    Command({"cycle", "aid"});
+  } else {
+    Command({"set", "aid", track.empty() ? "auto" : track});
+  }
+}
+
+void LibmpvPlayer::SetAspectRatio(const std::string& ratio) {
+  if (destroyed_ || !using_mpv_ || !mpv_) return;
+  if (ratio == "stretch") {
+    Command({"set", "video-aspect-override", "-1"});
+    Command({"set", "keepaspect", "no"});
+  } else {
+    Command({"set", "keepaspect", "yes"});
+    if (ratio == "16:9" || ratio == "16/9") {
+      Command({"set", "video-aspect-override", "16:9"});
+    } else if (ratio == "4:3" || ratio == "4/3") {
+      Command({"set", "video-aspect-override", "4:3"});
+    } else {
+      Command({"set", "video-aspect-override", "-1"});
+    }
+  }
+}
+
 NativePlayerState LibmpvPlayer::GetState() const {
   NativePlayerState snapshot = state_;
   if (using_mpv_ && mpv_) {
@@ -149,7 +224,19 @@ NativePlayerState LibmpvPlayer::GetState() const {
     if (library.getDouble(mpv_, "volume", &value) >= 0) snapshot.volume = std::clamp(value, 0.0, 100.0);
     if (library.getFlag(mpv_, "pause", &flag) >= 0) snapshot.paused = flag;
     if (library.getFlag(mpv_, "mute", &flag) >= 0) snapshot.muted = flag;
+    if (library.getFlag(mpv_, "paused-for-cache", &flag) >= 0) snapshot.buffering = flag;
+    if (library.getDouble(mpv_, "cache-buffering-state", &value) >= 0) snapshot.cachePercent = std::clamp(value, 0.0, 100.0);
+    double video_width = 0;
+    double video_height = 0;
+    bool core_idle = false;
+    const bool has_video_width = library.getDouble(mpv_, "video-out-params/w", &video_width) >= 0
+      || library.getDouble(mpv_, "video-params/w", &video_width) >= 0;
+    const bool has_video_height = library.getDouble(mpv_, "video-out-params/h", &video_height) >= 0
+      || library.getDouble(mpv_, "video-params/h", &video_height) >= 0;
+    library.getFlag(mpv_, "core-idle", &core_idle);
+    snapshot.videoReady = has_video_width && has_video_height && video_width > 0 && video_height > 0 && !core_idle;
     if (library.getFlag(mpv_, "eof-reached", &flag) >= 0 && flag) snapshot.stopped = true;
+    if (snapshot.stopped) snapshot.videoReady = false;
   }
   return snapshot;
 }

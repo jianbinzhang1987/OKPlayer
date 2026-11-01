@@ -89,3 +89,35 @@ test("media protocol wrapper releases the upstream reader when the client aborts
     await gateway.stop();
   }
 });
+
+test("gateway client disconnection before headers aborts upstream fetch", async () => {
+  const sessions = new PlaybackSessionStore();
+  const session = sessions.create({ url: "https://cdn.example.com/protected.mp4", headers: {}, format: "mp4", resolvedBy: "direct" });
+  let upstreamAborted = false;
+  const service = new MediaProtocolService(
+    sessions,
+    async (_url, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          upstreamAborted = true;
+          reject(new DOMException("aborted", "AbortError"));
+        }, { once: true });
+      });
+    },
+  );
+  const gateway = new LocalMediaGateway(service, sessions);
+  await gateway.start();
+  try {
+    const controller = new AbortController();
+    const fetchPromise = fetch(gateway.playbackUrl(session.id), { signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await fetchPromise.catch(() => undefined);
+    for (let attempt = 0; attempt < 40 && !upstreamAborted; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(upstreamAborted, true, "upstream handshake must be aborted when client disconnects before headers");
+  } finally {
+    await gateway.stop();
+  }
+});

@@ -6,6 +6,7 @@ const appPath = new URL("../src/desktop/renderer/App.vue", import.meta.url);
 const preloadPath = new URL("../src/desktop/preload.ts", import.meta.url);
 const mainPath = new URL("../src/desktop/main.ts", import.meta.url);
 const playerPath = new URL("../src/desktop/renderer/components/EmbeddedPlayer.vue", import.meta.url);
+const stylesPath = new URL("../src/desktop/renderer/styles.css", import.meta.url);
 const prototypePath = new URL("../docs/prototypes/CatVod 播放源管理与来源选择器原型.html", import.meta.url);
 
 test("renderer exposes CatVod source home category filters pagination and discovery routing", async () => {
@@ -56,6 +57,13 @@ test("embedded player exposes CatVod subtitle track without bypassing the media 
   assert.ok(player.includes("session.subtitleUrl"));
   assert.ok(player.includes('kind="subtitles"'));
   assert.ok(player.includes(":src=\"session.subtitleUrl\""));
+});
+
+test("source picker keeps category filters visible when the list is height-constrained", async () => {
+  const styles = await readFile(stylesPath, "utf8");
+  assert.match(styles, /\.source-picker-tabs\s*\{[\s\S]*?flex:\s*0 0 auto;[\s\S]*?min-height:\s*31px;/);
+  assert.match(styles, /\.source-picker-groups\s*\{[\s\S]*?flex:\s*1 1 auto;/);
+  assert.match(styles, /\.source-picker-footer\s*\{[\s\S]*?flex:\s*0 0 auto;/);
 });
 
 test("confirmed quick source prototype is implemented in the formal renderer", async () => {

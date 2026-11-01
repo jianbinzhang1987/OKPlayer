@@ -183,7 +183,7 @@ export function getSiteCapability(site: SiteConfig): SourceCapability {
       supported: false,
       runtime: "android-dex",
       capabilities: { ...UNSUPPORTED_CAPABILITIES },
-      reason: `依赖 Android Dex/JAR Spider（${api}）${detail}；该运行时不能在 macOS 进程中直接执行`,
+      reason: `依赖 Android Dex/JAR Spider（${api}）${detail}；该运行时不能在桌面端进程中直接执行`,
     };
   }
 
